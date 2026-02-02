@@ -16,10 +16,7 @@ A multi-platform (x86/ARM) monitoring solution for RedLab-TC (USB-TC) DAQ device
 - K-type Thermocouples (supports up to 8 channels).
 - Host machine: Raspberry Pi 4/5 or any PC with Linux/macOS/Windows.
 
-## 📦 Quick Start
-
-   git clone https://github.com/nomad375/redlab-daq-project.git
+1. **Clone the repository:**
+   ```bash
+   git clone [https://github.com/nomad375/redlab-daq-project.git](https://github.com/nomad375/redlab-daq-project.git)
    cd redlab-daq-project
-   cp .env.example .env # Edit .env to set your passwords/tokens if needed
-   chmod +x setup.sh
-   ./setup.sh
