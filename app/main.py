@@ -11,6 +11,8 @@ URL = os.getenv("INFLUX_URL", "http://influxdb:8086")
 TOKEN = os.getenv("INFLUX_TOKEN")
 ORG = os.getenv("INFLUX_ORG")
 BUCKET = os.getenv("INFLUX_BUCKET")
+TEMP_MIN = float(os.getenv("TEMP_MIN", "-70"))
+TEMP_MAX = float(os.getenv("TEMP_MAX", "600"))
 
 def get_device():
     """Locate and connect to the RedLab-TC device. Exit if not found."""
@@ -55,7 +57,7 @@ def main():
             for ch in range(8):
                 try:
                     temp = ai_device.t_in(ch, TempScale.CELSIUS)
-                    if -70 < temp < 600:   # Limiting temperature range for K-type TC
+                    if TEMP_MIN < temp < TEMP_MAX:
                         points.append(
                             Point("temperature")
                             .tag("channel", f"ch{ch}")

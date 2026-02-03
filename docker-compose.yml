@@ -10,7 +10,8 @@ services:
     environment:
       - INFLUX_URL=http://influxdb:8086
     depends_on:
-      - influxdb
+      influxdb:
+        condition: service_healthy 
 
   influxdb:
     image: influxdb:2.7
@@ -27,7 +28,12 @@ services:
       - DOCKER_INFLUXDB_INIT_BUCKET=${INFLUX_BUCKET}
       - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUX_TOKEN}
     restart: always
-
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8086/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  
   grafana:
     image: grafana/grafana-oss
     container_name: grafana
@@ -36,7 +42,7 @@ services:
     env_file: .env
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
-      - GF_SERVER_ROOT_URL=${GRAFANA_ACCESS_ADRESS}
+      - GF_SERVER_ROOT_URL=${GRAFANA_ACCESS_ADDRESS}
     volumes:
       - grafana_data:/var/lib/grafana
       - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources

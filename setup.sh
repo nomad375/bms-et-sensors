@@ -44,6 +44,7 @@ fi
 if [ "$NEEDS_REBUILD" = true ] || [ -z "$($DOCKER_CMD compose ps -q)" ]; then
     echo ">>> Starting/Rebuilding containers..."
     $DOCKER_CMD compose down
+    $DOCKER_CMD image prune -f
     $DOCKER_CMD compose up -d --build
     echo ">>> System is running and updated."
 else
