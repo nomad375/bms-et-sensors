@@ -1,6 +1,6 @@
 services:
   daq-collector:
-    build: .
+    image: nomad375/redlab-daq:latest
     container_name: redlab_app
     privileged: true
     restart: always
