@@ -1,10 +1,10 @@
 import os
 import time
 import sys
-from uldaq import (get_daq_device_inventory, DaqDevice, InterfaceType, 
+from uldaq import (get_daq_device_inventory, DaqDevice, InterfaceType,  # type: ignore
                    TcType, ULException, TempScale)
-from influxdb_client import InfluxDBClient, Point
-from influxdb_client.client.write_api import SYNCHRONOUS
+from influxdb_client import InfluxDBClient, Point # type: ignore
+from influxdb_client.client.write_api import SYNCHRONOUS # type: ignore
 
 # Configuration from environment variables
 URL = os.getenv("INFLUX_URL", "http://influxdb:8086")
