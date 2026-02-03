@@ -5,7 +5,7 @@ services:
     privileged: true
     restart: always
     volumes:
-      - /dev/bus/usb:/dev/bus/usb
+      - /dev:/dev
     env_file: .env
     environment:
       - INFLUX_URL=http://influxdb:8086

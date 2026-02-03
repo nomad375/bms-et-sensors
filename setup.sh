@@ -7,4 +7,4 @@ if [ ! -f .env ]; then
 fi
 docker compose down -v
 docker compose up -d --build
-echo "System is starting. Check logs with: docker compose logs -f"
+docker compose logs -f
