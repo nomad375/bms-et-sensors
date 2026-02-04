@@ -1,5 +1,5 @@
 services:
-  daq-collector:
+  redlab-app:
     image: nomad375/redlab-daq:latest
     container_name: redlab_app
     privileged: true
@@ -13,7 +13,7 @@ services:
       influxdb:
         condition: service_healthy 
 
-  mscl-collector:
+  mscl-app:
     image: nomad375/mscl-daq:latest
     container_name: mscl_app
     privileged: true
