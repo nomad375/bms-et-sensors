@@ -1,4 +1,3 @@
-Bash
 #!/bin/bash
 set -e
 
@@ -10,7 +9,7 @@ docker rmi nomad375/mscl-daq:latest 2>/dev/null || true
 
 # 2. Build the image locally using the override file (Target service: mscl-app)
 echo ">>> Compiling new image..."
-docker compose -f docker-compose.yml -f docker-compose.override.yml build mscl-app
+docker compose -f docker-compose.yml -f docker-compose.override.yml build --no-cache mscl-app
 
 # 3. Remove dangling build layers
 echo ">>> Cleaning up system..."

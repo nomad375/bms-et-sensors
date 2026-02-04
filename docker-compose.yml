@@ -1,7 +1,7 @@
 services:
   redlab-app:
     image: nomad375/redlab-daq:latest
-    container_name: redlab_app
+    container_name: redlab-app
     privileged: true
     restart: always
     volumes:
@@ -15,7 +15,7 @@ services:
 
   mscl-app:
     image: nomad375/mscl-daq:latest
-    container_name: mscl_app
+    container_name: mscl-app
     privileged: true
     restart: always
     volumes:

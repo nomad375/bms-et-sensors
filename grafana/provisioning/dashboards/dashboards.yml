@@ -9,4 +9,4 @@ providers:
     editable: true
     options:
       # Path inside the Grafana container where JSON is mounted
-      path: /var/lib/grafana/dashboards
+      path: /etc/grafana/provisioning/dashboards
