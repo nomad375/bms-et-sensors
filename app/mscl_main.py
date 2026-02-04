@@ -5,22 +5,26 @@ import glob
 from influxdb_client import InfluxDBClient, Point
 from influxdb_client.client.write_api import SYNCHRONOUS
 
-# Add MSCL to path
-sys.path.append('/usr/share/python3-mscl')
+# 1. Путь к библиотеке (уже проверено, что работает)
+mscl_install_path = '/usr/lib/python3.12/dist-packages'
+if mscl_install_path not in sys.path:
+    sys.path.append(mscl_install_path)
+
 try:
-    import mscl
-except ImportError:
-    print("!!! Critical: MSCL not found. Check Dockerfile installation.")
+    import MSCL as mscl
+    print(f">>> MSCL Loaded Successfully. Version: {mscl.MSCL_VERSION}")
+except ImportError as e:
+    print(f"!!! Critical: MSCL not found. Error: {e}")
     sys.exit(1)
 
-# InfluxDB Configuration
+# InfluxDB Config
 URL = os.getenv("INFLUX_URL", "http://influxdb:8086")
 TOKEN = os.getenv("INFLUX_TOKEN")
 ORG = os.getenv("INFLUX_ORG")
 BUCKET = os.getenv("INFLUX_BUCKET")
 
 def find_base_station():
-    """Scan for MicroStrain Base Station on common USB ports."""
+    """Поиск BaseStation на USB портах."""
     ports = glob.glob('/dev/ttyACM*') + glob.glob('/dev/ttyUSB*')
     for port in ports:
         try:
@@ -33,50 +37,39 @@ def find_base_station():
     return None
 
 def main():
-    print(f">>> Starting MSCL Collector (Version {mscl.MSCL_VERSION})")
+    print(">>> Starting MSCL Collector Loop...")
     
-    # Initialize InfluxDB
+    # Инициализация InfluxDB
     db_client = InfluxDBClient(url=URL, token=TOKEN, org=ORG)
     write_api = db_client.write_api(write_options=SYNCHRONOUS)
 
-    # Connect to Hardware
-    base_station = find_base_station()
-    if not base_station:
-        print("!!! Error: No BaseStation found. Ensure it is plugged in.")
-        sys.exit(1)
-
-    print(">>> Listening for wireless nodes...")
+    base_station = None
     
+    # БЕСКОНЕЧНЫЙ ЦИКЛ поиска и работы
     while True:
-        try:
-            # Check for data packets (timeout 500ms)
-            packets = base_station.getData(500)
-            
-            for packet in packets:
-                points = []
-                node_address = packet.nodeAddress()
-                
-                for data_point in packet.data():
-                    # Create InfluxDB Point for each channel
-                    p = Point("microstrain") \
-                        .tag("node", str(node_address)) \
-                        .tag("channel", data_point.channelName()) \
-                        .field("value", data_point.as_float())
-                    points.append(p)
-                
-                if points:
-                    write_api.write(BUCKET, ORG, points)
-                    print(f"Node {node_address}: Logged {len(points)} data points.")
+        if base_station is None:
+            base_station = find_base_station()
+            if base_station is None:
+                print(">>> Waiting for BaseStation USB device...")
+                time.sleep(10) # Ждем 10 секунд перед следующим поиском
+                continue
 
-        except mscl.Error as e:
-            # Handle empty queue or hardware issues
-            if "Connection error" in str(e):
-                print(f"!!! Connection lost: {e}")
-                sys.exit(1)
-            time.sleep(0.1)
+        try:
+            # Пытаемся получить данные
+            packets = base_station.getData(1000) # Таймаут 1 сек
+            for packet in packets:
+                print(f">>> Received packet from Node: {packet.nodeAddress()}") # ДОБАВИТЬ ЭТО
+                points = [] 
+                pass
+            
+            # Если данных нет, просто спим немного, чтобы не грузить CPU
+            if not packets:
+                time.sleep(0.1)
+
         except Exception as e:
-            print(f"!!! Runtime error: {e}")
-            time.sleep(1)
+            print(f">>> Connection issue or error: {e}")
+            base_station = None # Сбрасываем станцию, чтобы начать поиск заново
+            time.sleep(5)
 
 if __name__ == "__main__":
     main()

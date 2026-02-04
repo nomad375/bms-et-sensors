@@ -1,36 +1,31 @@
-# STAGE 1: Runtime environment
 FROM python:3.12-slim
 
-# Install system dependencies for MSCL and communication
+# 1. Системные зависимости
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget \
-    ca-certificates \
-    libbluetooth3 \
-    libboost-system-dev \
-    libboost-filesystem-dev \
-    libboost-program-options-dev \
+    wget ca-certificates libbluetooth3 libboost-system-dev \
+    libboost-filesystem-dev libboost-program-options-dev libboost-python-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /tmp
 
-# Download and install pre-compiled MSCL v68.1.0
+# 2. Установка MSCL по прямым ссылкам
 RUN ARCH=$(uname -m) && \
     if [ "$ARCH" = "x86_64" ]; then \
-        MSCL_URL="https://github.com/LORD-MicroStrain/MSCL/releases/download/v68.1.0/python3-mscl_68.1.0_amd64.deb"; \
+        MSCL_URL="https://github.com/LORD-MicroStrain/MSCL/releases/download/latest/MSCL-Python3.12-x86_64-v68.1.0.deb"; \
     elif [ "$ARCH" = "aarch64" ]; then \
-        MSCL_URL="https://github.com/LORD-MicroStrain/MSCL/releases/download/v68.1.0/python3-mscl_68.1.0_arm64.deb"; \
+        MSCL_URL="https://github.com/LORD-MicroStrain/MSCL/releases/download/latest/MSCL-Python3.12-aarch64-v68.1.0.deb"; \
     fi && \
-    wget --quiet $MSCL_URL -O mscl.deb && \
+    wget --quiet "$MSCL_URL" -O mscl.deb && \
     dpkg -i mscl.deb || apt-get install -f -y && \
     rm mscl.deb
+
+# 3. Настройка окружения
+ENV PYTHONPATH="${PYTHONPATH}:/usr/lib/python3.12/dist-packages"
+ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 COPY app/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy MicroStrain collector script
 COPY app/mscl_main.py .
 
-ENV PYTHONUNBUFFERED=1
-# Run MicroStrain collector
 CMD ["python", "mscl_main.py"]
