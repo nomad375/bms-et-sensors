@@ -31,7 +31,22 @@ ORG = os.getenv("INFLUX_ORG")
 BUCKET = os.getenv("INFLUX_BUCKET")
 
 # Настройки сбора
-TARGET_NODE = 16907
+def parse_target_nodes():
+    raw = os.getenv("MSCL_NODES", "").strip()
+    if not raw:
+        return []
+    nodes = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            nodes.append(int(part))
+        except ValueError:
+            continue
+    return nodes
+
+TARGET_NODES = parse_target_nodes() or [16904]
 MAX_ADC = 16777215.0 
 
 # --- ФУНКЦИИ СБОРА (COLLECTOR) ---
@@ -58,15 +73,49 @@ def find_base_station():
     return None
 
 def kickstart_network(base_station):
-    print(f">>> [KICKSTART] Configuring network for Node {TARGET_NODE}...", flush=True)
+    print(f">>> [KICKSTART] Configuring network for Nodes {TARGET_NODES}...", flush=True)
     try:
         print("    -> Enabling Beacon...", flush=True)
         base_station.enableBeacon()
-        node = mscl.WirelessNode(TARGET_NODE, base_station)
-        print(f"    -> Sending StartSyncSampling to {TARGET_NODE}...", flush=True)
-        node.startSyncSampling() 
-        print("    -> SUCCESS: Node is now sampling.", flush=True)
-        return True
+        any_ok = False
+        for node_id in TARGET_NODES:
+            node = mscl.WirelessNode(node_id, base_station)
+            node.readWriteRetries(15)
+            started = False
+            err_sync = None
+            err_non = None
+            err_resend_sync = None
+
+            if hasattr(node, "startSyncSampling"):
+                try:
+                    print(f"    -> Sending StartSyncSampling to {node_id}...", flush=True)
+                    node.startSyncSampling()
+                    started = True
+                except Exception as e:
+                    err_sync = e
+
+            if not started and hasattr(node, "startNonSyncSampling"):
+                try:
+                    print(f"    -> Sending StartNonSyncSampling to {node_id}...", flush=True)
+                    node.startNonSyncSampling()
+                    started = True
+                except Exception as e:
+                    err_non = e
+
+            if not started and hasattr(node, "resendStartSyncSampling"):
+                try:
+                    print(f"    -> Resending StartSyncSampling to {node_id}...", flush=True)
+                    node.resendStartSyncSampling()
+                    started = True
+                except Exception as e:
+                    err_resend_sync = e
+
+            if started:
+                print(f"    -> SUCCESS: Node {node_id} is now sampling.", flush=True)
+                any_ok = True
+            else:
+                print(f"    -> [!] Kickstart failed for {node_id}: sync_err={err_sync}; non_sync_err={err_non}; resend_sync_err={err_resend_sync}", flush=True)
+        return any_ok
     except Exception as e:
         print(f"    -> [!] Kickstart failed: {e}", flush=True)
         return False

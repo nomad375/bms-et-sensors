@@ -1,8 +1,12 @@
 from flask import Flask, render_template_string, request, jsonify # type: ignore
+import logging
+from pathlib import Path
 import sys
 import glob
 import time
 import threading
+
+TEMPLATE_PATH = Path(__file__).parent / 'templates' / 'mscl_web_config.html'
 
 # Подключаем MSCL
 mscl_path = '/usr/lib/python3.12/dist-packages'
@@ -13,14 +17,33 @@ import MSCL as mscl # type: ignore
 
 app = Flask(__name__)
 
+# Suppress Flask request logs (GET/POST lines)
+logging.getLogger("werkzeug").setLevel(logging.WARNING)
+
+CONNECT_LOCK = threading.Lock()
+OP_LOCK = threading.Lock()
+
 # Глобальные переменные
 BASE_STATION = None
 BAUDRATE = 3000000 
-CURRENT_PORT = "Offline"
-BASE_RADIO_CH = "N/A"
-BASE_LOCK = threading.Lock()
+LOG_BUFFER = []
+LOG_MAX = 200
+LAST_BASE_STATUS = {"connected": False, "port": "N/A", "message": "Not connected", "ts": None}
+LAST_PING_OK_TS = 0
+PING_TTL_SEC = 10
+CONNECT_BACKOFF_SEC = 1.5
+PING_COOLDOWN_SEC = 5
+NEXT_PING_ALLOWED_TS = 0
+CURRENT_PORT = None
+LAST_CONNECT_ATTEMPT_TS = 0
+CONNECT_MIN_INTERVAL_SEC = 2.0
 
-# Ваша полная карта частот
+def log(msg):
+    print(msg, flush=True)
+    LOG_BUFFER.append(f"{time.strftime('%H:%M:%S')} {msg}")
+    if len(LOG_BUFFER) > LOG_MAX:
+        del LOG_BUFFER[0:len(LOG_BUFFER) - LOG_MAX]
+
 RATE_MAP = {
     106: "1 Hz", 107: "2 Hz", 108: "4 Hz", 109: "8 Hz",
     110: "16 Hz", 111: "32 Hz", 112: "64 Hz", 113: "128 Hz",
@@ -29,335 +52,432 @@ RATE_MAP = {
     122: "64 kHz", 123: "128 kHz"
 }
 
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>TC-Link-200 Configurator</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <style>
-        body { padding: 20px; background-color: #f8f9fa; font-family: sans-serif; }
-        .card { margin-bottom: 20px; border: none; box-shadow: 0 4px 10px rgba(0,0,0,0.1); border-radius: 10px; }
-        .status-ok { color: #2ecc71; font-weight: bold; }
-        .status-err { color: #e74c3c; font-weight: bold; }
-        .diag-text { font-size: 0.85rem; color: #6c757d; line-height: 1.6; }
-        .base-frame { background: #e3f2fd; border-left: 5px solid #0d6efd; padding: 15px; border-radius: 8px; margin-top: 15px; display: none; }
-        .base-label { font-size: 0.75rem; font-weight: bold; color: #495057; text-transform: uppercase; }
-        .base-val { font-family: monospace; font-size: 1.1rem; color: #0d6efd; font-weight: bold; }
-        .node-ch-badge { background: #6c757d; color: white; padding: 2px 6px; border-radius: 4px; font-weight: bold; }
-    </style>
-</head>
-<body>
-<div class="container" style="max-width: 800px;">
-    <div class="card p-3 shadow-sm bg-primary text-white">
-        <div class="d-flex justify-content-between align-items-center">
-            <h4 class="m-0">📡 Конфигуратор TC-Link-200</h4>
-            <button onclick="connectBase()" class="btn btn-light btn-sm fw-bold text-primary">🔌 ПРОВЕРИТЬ USB</button>
-        </div>
-        <div id="baseInfoFrame" class="base-frame text-dark shadow-sm">
-            <div class="row text-center">
-                <div class="col-6">
-                    <div class="base-label">Порт устройства</div>
-                    <div id="basePort" class="base-val">---</div>
-                </div>
-                <div class="col-6">
-                    <div class="base-label">Канал базы (Base CH)</div>
-                    <div id="baseCh" class="base-val">--</div>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <div class="card p-4 shadow-sm">
-        <div class="row g-3 align-items-center">
-            <div class="col-md-4">
-                <div class="input-group">
-                    <span class="input-group-text">Node ID</span>
-                    <input type="number" id="nodeId" class="form-control" value="16907">
-                </div>
-            </div>
-            <div class="col-md-8">
-                <button id="btnRead" onclick="readConfig()" class="btn btn-success w-100 fw-bold">🔍 СЧИТАТЬ НАСТРОЙКИ</button>
-            </div>
-        </div>
-        <div id="readStatus" class="mt-2 text-center fw-bold small"></div>
-    </div>
-
-    <div id="configCard" style="display:none;">
-        <div class="card p-4 shadow-sm">
-            <div class="row mb-4">
-                <div class="col-md-6">
-                    <label class="form-label fw-bold">Частота (Sample Rate)</label>
-                    <select id="sampleRate" class="form-select"></select>
-                </div>
-                <div class="col-md-6">
-                    <label class="form-label fw-bold">Мощность радио</label>
-                    <select id="txPower" class="form-select">
-                        <option value="20">20 dBm (Max)</option>
-                        <option value="16">16 dBm</option>
-                        <option value="10">10 dBm</option>
-                        <option value="5">5 dBm</option>
-                        <option value="0">0 dBm (Min)</option>
-                    </select>
-                </div>
-            </div>
-
-            <label class="form-label fw-bold text-primary">Активные каналы:</label>
-            <div id="channelsArea" class="mb-4"></div>
-
-            <div id="diagArea" class="diag-text mb-4 p-2 bg-light rounded text-center"></div>
-
-            <button id="btnWrite" onclick="applyConfig()" class="btn btn-primary w-100 fw-bold py-2 shadow-sm">💾 ЗАПИСАТЬ В EEPROM</button>
-            <div id="writeStatus" class="mt-3 text-center fw-bold"></div>
-        </div>
-    </div>
-</div>
-
-<script>
-    async function connectBase() {
-        const frame = document.getElementById('baseInfoFrame');
-        try {
-            const res = await fetch('/api/connect', {method:'POST'});
-            const data = await res.json();
-            frame.style.display = 'block';
-            if(data.success) {
-                document.getElementById('basePort').innerText = data.port;
-                document.getElementById('baseCh').innerText = data.base_ch;
-            } else {
-                frame.innerHTML = '<div class="text-center status-err p-2">❌ База не найдена</div>';
-            }
-        } catch (e) { }
-    }
-    
-    window.onload = connectBase;
-
-    async function readConfig() {
-        const id = document.getElementById('nodeId').value;
-        const statusDiv = document.getElementById('readStatus');
-        const btn = document.getElementById('btnRead');
-        
-        btn.disabled = true;
-        statusDiv.className = "mt-2 text-center text-primary";
-        statusDiv.innerHTML = "⌛ Чтение... Если ошибка 46/94, подождите 3 сек и нажмите еще раз.";
-        document.getElementById('configCard').style.display = "none";
-        
-        try {
-            const res = await fetch(`/api/read/${id}`);
-            const data = await res.json();
-            if(data.success) {
-                statusDiv.className = "mt-2 text-center status-ok";
-                statusDiv.innerHTML = "✅ Настройки получены";
-                document.getElementById('configCard').style.display = "block";
-                document.getElementById('txPower').value = data.current_power;
-                
-                document.getElementById('diagArea').innerHTML = `
-                    <b>Model:</b> ${data.model} | <b>FW:</b> ${data.fw} | <b>S/N:</b> ${data.sn} | <b>Battery:</b> ${data.battery}V <br>
-                    <b>Node Radio Channel:</b> <span class="node-ch-badge">${data.node_ch}</span>
-                `;
-
-                const sel = document.getElementById('sampleRate');
-                sel.innerHTML = "";
-                data.supported_rates.forEach(r => {
-                    let opt = document.createElement('option');
-                    opt.value = r.enum_val; opt.text = r.str_val;
-                    if(r.enum_val == data.current_rate) opt.selected = true;
-                    sel.add(opt);
-                });
-
-                const chArea = document.getElementById('channelsArea');
-                chArea.innerHTML = "";
-                data.channels.forEach(ch => {
-                    let checked = ch.enabled ? "checked" : "";
-                    chArea.innerHTML += `
-                        <div class="border rounded p-2 mb-2 bg-white d-flex justify-content-between align-items-center">
-                            <div class="form-check form-switch m-0">
-                                <input class="form-check-input ch-enable" type="checkbox" id="ch_${ch.id}" ${checked}>
-                                <label class="form-check-label fw-bold">Channel ${ch.id}</label>
-                            </div>
-                        </div>`;
-                });
-            } else {
-                statusDiv.className = "mt-2 text-center status-err";
-                statusDiv.innerHTML = "❌ Ошибка: " + data.error;
-            }
-        } finally { btn.disabled = false; }
-    }
-
-    async function applyConfig() {
-        const id = document.getElementById('nodeId').value;
-        const rate = document.getElementById('sampleRate').value;
-        const power = document.getElementById('txPower').value;
-        const statusDiv = document.getElementById('writeStatus');
-        
-        let activeChs = [];
-        document.querySelectorAll('.ch-enable').forEach(cb => {
-            if(cb.checked) { activeChs.push(parseInt(cb.id.replace('ch_', ''))); }
-        });
-        
-        statusDiv.className = "mt-3 text-center text-primary";
-        statusDiv.innerHTML = "⏳ Сохранение...";
-        try {
-            const res = await fetch('/api/write', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ node_id: id, sample_rate: parseInt(rate), tx_power: parseInt(power), channels: activeChs })
-            });
-            const data = await res.json();
-            statusDiv.innerHTML = data.success ? "<span class='status-ok'>✅ УСПЕШНО СОХРАНЕНО</span>" : `<span class='status-err'>❌ ${data.error}</span>`;
-        } catch (e) { }
-    }
-</script>
-</body>
-</html>
-"""
+HTML_TEMPLATE = None
 
 def find_port():
     ports = glob.glob('/dev/ttyACM*') + glob.glob('/dev/ttyUSB*')
     return ports[0] if ports else None
 
-def internal_connect():
-    global BASE_STATION, CURRENT_PORT, BASE_RADIO_CH
-    if BASE_STATION: return True, CURRENT_PORT
-    port = find_port()
-    if not port: return False, "No Port"
-    try:
-        conn = mscl.Connection.Serial(port, BAUDRATE)
-        station = mscl.BaseStation(conn)
-        station.readWriteRetries(10)
-        if station.ping():
-            # Метод получения канала из вашей последней успешной итерации
-            try: BASE_RADIO_CH = str(int(station.frequency()))
-            except: BASE_RADIO_CH = "18"
-            
-            BASE_STATION = station
-            CURRENT_PORT = port
-            BASE_STATION.enableBeacon()
-            return True, port
-        return False, "Ping failed"
-    except Exception as e:
-        BASE_STATION = None
-        CURRENT_PORT = "Offline"
-        return False, str(e)
-
-def get_station_or_error():
-    ok, msg = internal_connect()
-    if not ok or BASE_STATION is None:
-        return None, msg
-    return BASE_STATION, None
-
-def reset_station():
-    global BASE_STATION, CURRENT_PORT, BASE_RADIO_CH
-    BASE_STATION = None
-    CURRENT_PORT = "Offline"
-    BASE_RADIO_CH = "N/A"
+def internal_connect(force_ping=False):
+    global BASE_STATION, LAST_PING_OK_TS, NEXT_PING_ALLOWED_TS, CURRENT_PORT, LAST_CONNECT_ATTEMPT_TS
+    now = time.time()
+    with CONNECT_LOCK:
+        if BASE_STATION and not force_ping:
+            return True, "Connected"
+        if BASE_STATION and not force_ping and now < NEXT_PING_ALLOWED_TS:
+            return True, "Connected"
+        if BASE_STATION and force_ping:
+            try:
+                if BASE_STATION.ping():
+                    LAST_PING_OK_TS = now
+                    LAST_BASE_STATUS.update({"connected": True, "message": "Connected", "ts": time.strftime("%H:%M:%S")})
+                    return True, "Connected"
+            except Exception:
+                BASE_STATION = None
+        if (now - LAST_CONNECT_ATTEMPT_TS) < CONNECT_MIN_INTERVAL_SEC:
+            return False, "Connect throttled"
+        LAST_CONNECT_ATTEMPT_TS = now
+        port = CURRENT_PORT or find_port()
+        if not port:
+            LAST_BASE_STATUS.update({"connected": False, "port": "N/A", "message": "No Port", "ts": time.strftime("%H:%M:%S")})
+            return False, "No Port"
+        try:
+            log(f"[mscl-web] Connecting BaseStation on {port}...")
+            conn = mscl.Connection.Serial(port, BAUDRATE)
+            station = mscl.BaseStation(conn)
+            station.readWriteRetries(10)
+            if station.ping():
+                BASE_STATION = station
+                BASE_STATION.enableBeacon()
+                LAST_PING_OK_TS = now
+                CURRENT_PORT = port
+                LAST_BASE_STATUS.update({"connected": True, "port": port, "message": "OK", "ts": time.strftime("%H:%M:%S")})
+                log(f"[mscl-web] BaseStation OK port={port}")
+                return True, port
+            LAST_BASE_STATUS.update({"connected": False, "port": port, "message": "Ping failed", "ts": time.strftime("%H:%M:%S")})
+            log("[mscl-web] BaseStation ping failed")
+            time.sleep(CONNECT_BACKOFF_SEC)
+            return False, "Ping failed"
+        except Exception as e:
+            LAST_BASE_STATUS.update({"connected": False, "port": port, "message": str(e), "ts": time.strftime("%H:%M:%S")})
+            log(f"[mscl-web] BaseStation connect error: {e}")
+            time.sleep(CONNECT_BACKOFF_SEC)
+            return False, str(e)
 
 @app.route('/')
-def index(): return render_template_string(HTML_TEMPLATE)
+def index(): return render_template_string(TEMPLATE_PATH.read_text())
 
 @app.route('/api/connect', methods=['POST'])
 def api_connect():
-    with BASE_LOCK:
+    with OP_LOCK:
         s, p = internal_connect()
-        return jsonify(success=s, port=p, base_ch=BASE_RADIO_CH)
+        return jsonify(success=s, port=p)
+
+@app.route('/api/status')
+def api_status():
+    with OP_LOCK:
+        ok = BASE_STATION is not None
+        msg = LAST_BASE_STATUS.get("message", "Not connected")
+        port = LAST_BASE_STATUS.get("port", "N/A")
+        def _trim_ts(value):
+            try:
+                s = str(value)
+                if "." in s:
+                    return s.split(".")[0]
+                return s
+            except Exception:
+                return value
+        base_model = None
+        base_fw = None
+        base_serial = None
+        base_region = None
+        base_radio = None
+        base_last_comm = None
+        base_link = None
+        if ok and BASE_STATION is not None:
+            try:
+                base_model = str(BASE_STATION.model())
+            except Exception:
+                base_model = None
+            try:
+                base_fw = str(BASE_STATION.firmwareVersion())
+            except Exception:
+                base_fw = None
+            try:
+                base_serial = str(BASE_STATION.serial())
+            except Exception:
+                try:
+                    base_serial = str(BASE_STATION.serialNumber())
+                except Exception:
+                    base_serial = None
+            try:
+                base_region = str(BASE_STATION.regionCode())
+            except Exception:
+                base_region = None
+            try:
+                base_radio = str(BASE_STATION.frequency())
+            except Exception:
+                base_radio = None
+            try:
+                base_last_comm = _trim_ts(BASE_STATION.lastCommunicationTime())
+            except Exception:
+                base_last_comm = None
+            try:
+                base_link = str(BASE_STATION.lastDeviceState())
+            except Exception:
+                base_link = None
+        return jsonify(
+            connected=bool(ok),
+            port=port,
+            message=msg,
+            ts=LAST_BASE_STATUS.get("ts"),
+            base_model=base_model,
+            base_fw=base_fw,
+            base_serial=base_serial,
+            base_region=base_region,
+            base_radio=base_radio,
+            base_last_comm=base_last_comm,
+            base_link=base_link
+        )
+
+@app.route('/api/reconnect', methods=['POST'])
+def api_reconnect():
+    global BASE_STATION, LAST_PING_OK_TS
+    with OP_LOCK:
+        BASE_STATION = None
+        LAST_PING_OK_TS = 0
+        ok, msg = internal_connect(force_ping=True)
+        return jsonify(success=bool(ok), message=msg)
+
+@app.route('/api/diagnostics/<int:node_id>')
+def api_diagnostics(node_id):
+    with OP_LOCK:
+        ok, msg = internal_connect()
+        if not ok or BASE_STATION is None:
+            return jsonify(success=False, error=f"Base station not connected: {msg}")
+        try:
+            node = mscl.WirelessNode(node_id, BASE_STATION)
+            features = node.features()
+            flags = [
+                ("supportsSamplingMode", "supportsSamplingMode"),
+                ("supportsLostBeaconTimeout", "supportsLostBeaconTimeout"),
+                ("supportsInactivityTimeout", "supportsInactivityTimeout"),
+                ("supportsDiagnosticInfo", "supportsDiagnosticInfo"),
+                ("supportsTransmitPower", "supportsTransmitPower"),
+                ("supportsSampleRate", "supportsSampleRate"),
+                ("supportsChannel", "supportsChannel"),
+                ("supportsChannelSetting", "supportsChannelSetting"),
+            ]
+            out = []
+            for label, fn in flags:
+                try:
+                    out.append({"name": label, "value": bool(getattr(features, fn)())})
+                except Exception:
+                    out.append({"name": label, "value": False})
+            return jsonify(success=True, flags=out)
+        except Exception as e:
+            return jsonify(success=False, error=str(e))
+
+@app.route('/api/logs')
+def api_logs():
+    return jsonify(logs=LOG_BUFFER[-LOG_MAX:])
 
 @app.route('/api/read/<int:node_id>')
 def api_read(node_id):
-    global RATE_MAP
-    with BASE_LOCK:
-        station, err = get_station_or_error()
-        if station is None:
-            return jsonify(success=False, error=f"Base station not connected: {err}")
-    try:
-        node = mscl.WirelessNode(node_id, station)
-        # ВОЗВРАТ К НАСТРОЙКАМ ИЗ old_good_code.py
-        node.readWriteRetries(15)
+    global BASE_STATION, RATE_MAP
+    last_err = None
+    log(f"[mscl-web] Read request node_id={node_id}")
+    with OP_LOCK:
+        for attempt in range(1, 6):
+            log(f"[mscl-web] Read attempt {attempt}/5 node_id={node_id}")
+            ok, msg = internal_connect()
+            if not ok or BASE_STATION is None:
+                last_err = f"Base station not connected: {msg}"
+                log(f"[mscl-web] Read failed: {last_err}")
+                time.sleep(0.5)
+                continue
+            try:
+                node = mscl.WirelessNode(node_id, BASE_STATION)
+                node.readWriteRetries(15)
         
-        # 1. Принудительная остановка
-        status = node.setToIdle()
-        time.sleep(1.5) # Пауза 1.5 сек как в рабочем коде
+                # 1. Принудительная остановка (Auto-Idle before Read)
+                idle_ok = False
+                for idle_attempt in range(1, 3):
+                    try:
+                        log(f"[mscl-web] Read setToIdle attempt {idle_attempt}/2 node_id={node_id}")
+                        node.setToIdle()
+                        time.sleep(2.0)
+                        idle_ok = True
+                        break
+                    except Exception as e:
+                        log(f"[mscl-web] Read setToIdle failed node_id={node_id}: {e}")
+                        time.sleep(1.0)
+                if not idle_ok:
+                    last_err = "Failed to set node to Idle before Read"
+                    continue
 
-        # 2. ЧИТАЕМ ТОЛЬКО КРИТИЧЕСКИЕ ДАННЫЕ (EEPROM 24)
-        current_rate = int(node.getSampleRate())
-        active_mask = node.getActiveChannels()
+                # 2. ЧИТАЕМ ТОЛЬКО КРИТИЧЕСКИЕ ДАННЫЕ
+                current_rate = None
+                try:
+                    current_rate = int(node.getSampleRate())
+                except Exception as e:
+                    last_err = str(e)
+                    log(f"[mscl-web] Read warn node_id={node_id}: getSampleRate failed (1st): {last_err}")
+                    time.sleep(1.0)
+                    try:
+                        current_rate = int(node.getSampleRate())
+                    except Exception as e2:
+                        last_err = str(e2)
+                        log(f"[mscl-web] Read error node_id={node_id}: getSampleRate failed (2nd): {last_err}")
+                        if "EEPROM" in last_err:
+                            # Continue with partial data
+                            current_rate = None
+                        else:
+                            BASE_STATION = None
+                            LAST_PING_OK_TS = 0
+                            time.sleep(0.5)
+                            continue
+                try:
+                    active_mask = node.getActiveChannels()
+                except Exception:
+                    active_mask = None
         
-        # 3. ВСЕ ОСТАЛЬНОЕ - В TRY-EXCEPT
-        try: model = node.model()
-        except: model = "63104100"
+                # 3. Остальные поля — best-effort (не ломаем чтение при EEPROM ошибках)
+                try:
+                    model = node.model()
+                except Exception as e:
+                    model = "TC-Link-200"
+                    log(f"[mscl-web] Read warn node_id={node_id}: model read failed: {e}")
         
-        try: sn = str(node.nodeAddress())
-        except: sn = str(node_id)
+                try:
+                    sn = str(node.nodeAddress())
+                except Exception as e:
+                    sn = "N/A"
+                    log(f"[mscl-web] Read warn node_id={node_id}: serial read failed: {e}")
         
-        try: fw = str(node.firmwareVersion())
-        except: fw = "N/A"
+                try:
+                    fw = str(node.firmwareVersion())
+                except Exception as e:
+                    fw = "N/A"
+                    log(f"[mscl-web] Read warn node_id={node_id}: firmware read failed: {e}")
         
-        try: 
-            p_raw = int(node.getTransmitPower())
-            p_map = {0: 20, 1: 16, 2: 10, 3: 5, 4: 0}
-            current_power = p_map.get(p_raw, 20)
-        except: 
-            current_power = 20
+                try: 
+                    p_raw = int(node.getTransmitPower())
+                    p_map = {0: 20, 1: 16, 2: 10, 3: 5, 4: 0}
+                    current_power = p_map.get(p_raw, 20)
+                except Exception as e: 
+                    current_power = 20 # Дефолт при ошибке 94
+                    log(f"[mscl-web] Read warn node_id={node_id}: transmit power read failed: {e}")
             
-        try: battery = round(node.getCurBatteryVoltage(), 2)
-        except: battery = 0.0
+                # Optional status fields (best-effort)
+                try:
+                    region = str(node.regionCode())
+                except Exception:
+                    region = None
+                try:
+                    last_comm = str(node.lastCommunicationTime()).split(".")[0]
+                except Exception:
+                    last_comm = None
+                try:
+                    state = str(node.lastDeviceState())
+                except Exception:
+                    state = None
+                try:
+                    storage_pct = round(float(node.percentFull()), 2)
+                except Exception:
+                    storage_pct = None
+                try:
+                    sampling_mode_val = node.getSamplingMode()
+                    sampling_mode = "sync" if sampling_mode_val == mscl.WirelessTypes.samplingMode_sync else "non_sync"
+                except Exception:
+                    sampling_mode = None
+                try:
+                    data_mode = str(node.getDataMode())
+                except Exception:
+                    data_mode = None
 
-        try:
-            node_ch = str(int(node.getRadioChannel()))
-        except:
-            node_ch = "N/A"
-
-        # Частоты с поддержкой вашего RATE_MAP
-        features = node.features()
-        supported_rates = []
-        try:
-            rates = features.sampleRates(mscl.WirelessTypes.samplingMode_sync, 1, 0)
-            for r in rates:
-                rid = int(r)
-                supported_rates.append({"enum_val": rid, "str_val": RATE_MAP.get(rid, str(rid) + " Hz")})
-        except:
-            supported_rates.append({"enum_val": current_rate, "str_val": str(current_rate)})
+                # Частоты (если доступно)
+                supported_rates = []
+                if current_rate is not None:
+                    supported_rates.append({"enum_val": current_rate, "str_val": RATE_MAP.get(current_rate, str(current_rate) + " Hz")})
+                try:
+                    features = node.features()
+                    rates = features.sampleRates(mscl.WirelessTypes.samplingMode_sync, 1, 0)
+                    supported_rates = []
+                    for r in rates:
+                        rid = int(r)
+                        supported_rates.append({"enum_val": rid, "str_val": RATE_MAP.get(rid, str(rid) + " Hz")})
+                except Exception as e:
+                    log(f"[mscl-web] Read warn node_id={node_id}: features/sampleRates failed: {e}")
             
-        channels = []
-        for i in range(1, 3):
-            channels.append({"id": i, "enabled": active_mask.enabled(i)})
+                channels = []
+                if active_mask is not None:
+                    for i in range(1, 3):
+                        channels.append({"id": i, "enabled": active_mask.enabled(i)})
         
-        return jsonify(
-            success=True, model=model, sn=sn, fw=fw, battery=battery,
-            node_ch=node_ch, current_rate=current_rate, current_power=current_power,
-            supported_rates=supported_rates, channels=channels
-        )
-    except Exception as e:
-        with BASE_LOCK:
-            reset_station()
-        return jsonify(success=False, error=str(e))
+                return jsonify(
+                    success=True, model=model, sn=sn, fw=fw,
+                    region=region, last_comm=last_comm, state=state,
+                    storage_pct=storage_pct, sampling_mode=sampling_mode, data_mode=data_mode,
+                    current_rate=current_rate, current_power=current_power,
+                    supported_rates=supported_rates, channels=channels
+                )
+            except Exception as e:
+                last_err = str(e)
+                log(f"[mscl-web] Read error node_id={node_id}: {e}")
+                if "EEPROM" in last_err:
+                    backoff = min(4.0, 0.5 * (2 ** (attempt - 1)))
+                    time.sleep(backoff)
+                    continue
+                BASE_STATION = None
+                LAST_PING_OK_TS = 0
+                time.sleep(0.5)
+                continue
+    if last_err:
+        log(f"[mscl-web] Read failed node_id={node_id}: {last_err}")
+    else:
+        log(f"[mscl-web] Read failed node_id={node_id}: Read failed")
+    return jsonify(success=False, error=last_err or "Read failed")
+
+@app.route('/api/probe/<int:node_id>')
+def api_probe(node_id):
+    global BASE_STATION
+    log(f"[mscl-web] Probe request node_id={node_id}")
+    with OP_LOCK:
+        ok, msg = internal_connect()
+        if not ok or BASE_STATION is None:
+            err = f"Base station not connected: {msg}"
+            log(f"[mscl-web] Probe failed: {err}")
+            return jsonify(success=False, error=err)
+        try:
+            node = mscl.WirelessNode(node_id, BASE_STATION)
+            node.readWriteRetries(10)
+            # Try to nudge node without touching EEPROM
+            try:
+                node.setToIdle()
+                time.sleep(1.5)
+            except Exception as e:
+                log(f"[mscl-web] Probe setToIdle failed node_id={node_id}: {e}")
+            try:
+                node.ping()
+            except Exception as e:
+                log(f"[mscl-web] Probe ping failed node_id={node_id}: {e}")
+            # Skip resendStartSyncSampling to avoid EEPROM reads on stuck nodes
+            # Final idle
+            try:
+                node.setToIdle()
+                time.sleep(1.0)
+            except Exception:
+                pass
+            return jsonify(success=True, message="Probe commands sent")
+        except Exception as e:
+            log(f"[mscl-web] Probe error node_id={node_id}: {e}")
+            return jsonify(success=False, error=str(e))
 
 @app.route('/api/write', methods=['POST'])
 def api_write():
+    global BASE_STATION
     data = request.json
-    try:
-        with BASE_LOCK:
-            station, err = get_station_or_error()
-            if station is None:
-                return jsonify(success=False, error=f"Base station not connected: {err}")
-            node = mscl.WirelessNode(int(data['node_id']), station)
-        node.setToIdle()
-        time.sleep(1)
-        config = mscl.WirelessNodeConfig()
-        config.samplingMode(mscl.WirelessTypes.samplingMode_sync)
-        config.sampleRate(int(data['sample_rate']))
-        p_map = {20: 0, 16: 1, 10: 2, 5: 3, 0: 4}
-        config.transmitPower(p_map.get(data['tx_power'], 0))
-        full_mask = mscl.ChannelMask()
-        for ch_id in data['channels']:
-            full_mask.enable(ch_id)
-        config.activeChannels(full_mask)
-        node.applyConfig(config)
-        return jsonify(success=True)
-    except Exception as e:
-        with BASE_LOCK:
-            reset_station()
-        return jsonify(success=False, error=str(e))
+    last_err = None
+    last_was_eeprom = False
+    log(f"[mscl-web] Write request node_id={data.get('node_id')}")
+    with OP_LOCK:
+        for attempt in range(1, 6):
+            log(f"[mscl-web] Write attempt {attempt}/5 node_id={data.get('node_id')}")
+            # If last attempt failed with EEPROM read error, pause before retry.
+            if last_was_eeprom:
+                backoff = min(4.0, 0.5 * (2 ** (attempt - 1)))
+                time.sleep(backoff)
+            ok, msg = internal_connect()
+            if not ok or BASE_STATION is None:
+                last_err = f"Base station not connected: {msg}"
+                log(f"[mscl-web] Write failed: {last_err}")
+                time.sleep(0.5)
+                continue
+            try:
+                node = mscl.WirelessNode(int(data['node_id']), BASE_STATION)
+                node.readWriteRetries(15)
+                # Auto-Idle before Write
+                idle_ok = False
+                for idle_attempt in range(1, 3):
+                    try:
+                        log(f"[mscl-web] Write setToIdle attempt {idle_attempt}/2 node_id={data.get('node_id')}")
+                        node.setToIdle()
+                        time.sleep(2.5)
+                        idle_ok = True
+                        break
+                    except Exception as e:
+                        log(f"[mscl-web] Write setToIdle failed node_id={data.get('node_id')}: {e}")
+                        time.sleep(1.0)
+                if not idle_ok:
+                    last_err = "Failed to set node to Idle before Write"
+                    continue
+                config = mscl.WirelessNodeConfig()
+                config.samplingMode(mscl.WirelessTypes.samplingMode_sync)
+                config.sampleRate(int(data['sample_rate']))
+                p_map = {20: 0, 16: 1, 10: 2, 5: 3, 0: 4}
+                config.transmitPower(p_map.get(data['tx_power'], 0))
+                full_mask = mscl.ChannelMask()
+                for ch_id in data['channels']:
+                    full_mask.enable(ch_id)
+                config.activeChannels(full_mask)
+                node.applyConfig(config)
+                # Avoid pinging immediately after write
+                global NEXT_PING_ALLOWED_TS
+                NEXT_PING_ALLOWED_TS = time.time() + PING_COOLDOWN_SEC
+                log(f"[mscl-web] Write success node_id={data.get('node_id')}")
+                return jsonify(success=True)
+            except Exception as e:
+                last_err = str(e)
+                log(f"[mscl-web] Write error node_id={data.get('node_id')}: {e}")
+                # If the node returned an EEPROM read error, keep the base connection and retry.
+                last_was_eeprom = "EEPROM" in last_err
+                if not last_was_eeprom:
+                    BASE_STATION = None
+                    LAST_PING_OK_TS = 0
+                time.sleep(0.5)
+                continue
+    return jsonify(success=False, error=last_err or "Write failed")
 
 def run_config_server():
     app.run(host='0.0.0.0', port=5000)
-
-    # IT WORKS!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
