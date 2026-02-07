@@ -140,7 +140,22 @@
 
             <div class="border rounded p-3 mb-3 bg-light">
                 <div class="fw-bold text-primary mb-2">Calibration</div>
-                <div class="small text-muted">No editable calibration parameters in Stage A.</div>
+                <div class="row">
+                    <div class="col-md-6">
+                        <label class="form-label fw-bold">Unit (Raw Data ch1)</label>
+                        <select id="calibrationUnit" class="form-select" disabled>
+                            <option value="">N/A</option>
+                        </select>
+                        <div class="small text-muted mt-1">Editable when options are available</div>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label fw-bold">CJC Temperature Unit (ch2)</label>
+                        <select id="cjcCalibrationUnit" class="form-select" disabled>
+                            <option value="">N/A</option>
+                        </select>
+                        <div class="small text-muted mt-1">Celsius / Fahrenheit / Kelvin</div>
+                    </div>
+                </div>
             </div>
 
             <div class="border rounded p-3 mb-3 bg-light">
@@ -160,10 +175,18 @@
                 <div class="row">
                     <div class="col-md-6">
                         <label class="form-label fw-bold">Lost Beacon Timeout (min)</label>
+                        <div class="form-check form-switch mb-2">
+                            <input class="form-check-input" type="checkbox" id="lostBeaconEnabled">
+                            <label class="form-check-label" for="lostBeaconEnabled">On</label>
+                        </div>
                         <input id="lostBeaconTimeout" type="number" min="2" max="600" class="form-control" value="2">
                     </div>
                     <div class="col-md-6">
                         <label class="form-label fw-bold">Diagnostic Info Interval (s)</label>
+                        <div class="form-check form-switch mb-2">
+                            <input class="form-check-input" type="checkbox" id="diagnosticEnabled">
+                            <label class="form-check-label" for="diagnosticEnabled">On</label>
+                        </div>
                         <input id="diagnosticInterval" type="number" min="30" max="65535" class="form-control" value="60">
                     </div>
                 </div>
@@ -189,6 +212,10 @@
                     </div>
                     <div class="col-md-6" id="inactivityTimeoutWrap">
                         <label class="form-label fw-bold">User Inactivity Timeout (s)</label>
+                        <div class="form-check form-switch mb-2">
+                            <input class="form-check-input" type="checkbox" id="inactivityEnabled">
+                            <label class="form-check-label" for="inactivityEnabled">On</label>
+                        </div>
                         <input id="inactivityTimeout" type="number" min="1" max="65535" class="form-control" value="30">
                     </div>
                     <div class="col-md-6" id="checkRadioIntervalWrap">
@@ -360,6 +387,45 @@
                 const selectedInputRangeOpt = inputSel.options[inputSel.selectedIndex];
                 const inputRangeActual = selectedInputRangeOpt ? selectedInputRangeOpt.text : "N/A";
 
+                const unitSel = document.getElementById('calibrationUnit');
+                unitSel.innerHTML = "";
+                const unitOptions = Array.isArray(data.unit_options) ? data.unit_options : [];
+                if (!unitOptions.length) {
+                    const opt = document.createElement('option');
+                    opt.value = "";
+                    opt.text = "N/A";
+                    opt.selected = true;
+                    unitSel.add(opt);
+                } else {
+                    unitOptions.forEach(r => {
+                        const opt = document.createElement('option');
+                        opt.value = r.value;
+                        opt.text = r.label || `Value ${r.value}`;
+                        if (String(r.value) === String(data.current_unit)) opt.selected = true;
+                        unitSel.add(opt);
+                    });
+                }
+                unitSel.disabled = unitOptions.length === 0;
+                const cjcUnitSel = document.getElementById('cjcCalibrationUnit');
+                cjcUnitSel.innerHTML = "";
+                const cjcUnitOptions = Array.isArray(data.cjc_unit_options) ? data.cjc_unit_options : [];
+                if (!cjcUnitOptions.length) {
+                    const opt = document.createElement('option');
+                    opt.value = "";
+                    opt.text = "N/A";
+                    opt.selected = true;
+                    cjcUnitSel.add(opt);
+                } else {
+                    cjcUnitOptions.forEach(r => {
+                        const opt = document.createElement('option');
+                        opt.value = r.value;
+                        opt.text = r.label || `Value ${r.value}`;
+                        if (String(r.value) === String(data.current_cjc_unit)) opt.selected = true;
+                        cjcUnitSel.add(opt);
+                    });
+                }
+                cjcUnitSel.disabled = cjcUnitOptions.length === 0;
+
                 const lpSel = document.getElementById('lowPassFilter');
                 lpSel.innerHTML = "";
                 const lpOptions = Array.isArray(data.low_pass_options) ? data.low_pass_options : [];
@@ -399,6 +465,12 @@
                 }
                 document.getElementById('lostBeaconTimeout').value = (data.current_lost_beacon_timeout ?? 2);
                 document.getElementById('diagnosticInterval').value = (data.current_diagnostic_interval ?? 60);
+                const lostBeaconEnabled = !!data.current_lost_beacon_enabled;
+                const diagnosticEnabled = !!data.current_diagnostic_enabled;
+                document.getElementById('lostBeaconEnabled').checked = lostBeaconEnabled;
+                document.getElementById('diagnosticEnabled').checked = diagnosticEnabled;
+                document.getElementById('lostBeaconTimeout').disabled = !lostBeaconEnabled;
+                document.getElementById('diagnosticInterval').disabled = !diagnosticEnabled;
                 const supportsDefaultMode = !!data.supports_default_mode;
                 const supportsInactivityTimeout = !!data.supports_inactivity_timeout;
                 const supportsCheckRadioInterval = !!data.supports_check_radio_interval;
@@ -467,10 +539,14 @@
                     itWrap.style.display = "";
                     itInput.disabled = false;
                     itInput.value = (data.current_inactivity_timeout ?? 30);
+                    const inactivityEnabled = !!data.current_inactivity_enabled;
+                    document.getElementById('inactivityEnabled').checked = inactivityEnabled;
+                    itInput.disabled = !inactivityEnabled;
                 } else {
                     itWrap.style.display = "";
                     itInput.disabled = true;
                     itInput.value = "";
+                    document.getElementById('inactivityEnabled').checked = false;
                 }
 
                 const criWrap = document.getElementById('checkRadioIntervalWrap');
@@ -792,12 +868,17 @@
         const rate = document.getElementById('sampleRate').value;
         const power = document.getElementById('txPower').value;
         const inputRangeRaw = document.getElementById('inputRange').value;
+        const unitRaw = document.getElementById('calibrationUnit').value;
+        const cjcUnitRaw = document.getElementById('cjcCalibrationUnit').value;
         const lowPassFilterRaw = document.getElementById('lowPassFilter').value;
         const storageLimitModeRaw = document.getElementById('storageLimitMode').value;
         const lostBeaconTimeoutRaw = document.getElementById('lostBeaconTimeout').value;
         const diagnosticIntervalRaw = document.getElementById('diagnosticInterval').value;
+        const lostBeaconEnabled = document.getElementById('lostBeaconEnabled').checked;
+        const diagnosticEnabled = document.getElementById('diagnosticEnabled').checked;
         const defaultModeRaw = document.getElementById('defaultMode').value;
         const inactivityTimeoutRaw = document.getElementById('inactivityTimeout').value;
+        const inactivityEnabled = document.getElementById('inactivityEnabled').checked;
         const checkRadioIntervalRaw = document.getElementById('checkRadioInterval').value;
         const transducerTypeRaw = document.getElementById('transducerType').value;
         const sensorTypeRaw = document.getElementById('sensorType').value;
@@ -841,12 +922,17 @@
                     tx_power: parseInt(power),
                     channels: activeChs,
                     input_range: inputRangeRaw === "" ? null : parseInt(inputRangeRaw),
+                    unit: unitRaw === "" ? null : parseInt(unitRaw),
+                    cjc_unit: cjcUnitRaw === "" ? null : parseInt(cjcUnitRaw),
                     low_pass_filter: lowPassFilterRaw === "" ? null : parseInt(lowPassFilterRaw),
                     storage_limit_mode: storageLimitModeRaw === "" ? null : parseInt(storageLimitModeRaw),
                     lost_beacon_timeout: lostBeaconTimeoutRaw === "" ? null : parseInt(lostBeaconTimeoutRaw),
                     diagnostic_interval: diagnosticIntervalRaw === "" ? null : parseInt(diagnosticIntervalRaw),
+                    lost_beacon_enabled: !!lostBeaconEnabled,
+                    diagnostic_enabled: !!diagnosticEnabled,
                     default_mode: defaultModeRaw === "" ? null : parseInt(defaultModeRaw),
                     inactivity_timeout: inactivityTimeoutRaw === "" ? null : parseInt(inactivityTimeoutRaw),
+                    inactivity_enabled: !!inactivityEnabled,
                     check_radio_interval: checkRadioIntervalRaw === "" ? null : parseInt(checkRadioIntervalRaw),
                     transducer_type: transducerTypeRaw === "" ? null : parseInt(transducerTypeRaw),
                     sensor_type: sensorTypeRaw === "" ? null : parseInt(sensorTypeRaw),
@@ -886,6 +972,15 @@
     document.getElementById('nodeId').addEventListener('input', function() {
         const btn = document.getElementById('btnClearStorage');
         if (btn) btn.disabled = true;
+    });
+    document.getElementById('lostBeaconEnabled').addEventListener('change', function() {
+        document.getElementById('lostBeaconTimeout').disabled = !this.checked;
+    });
+    document.getElementById('diagnosticEnabled').addEventListener('change', function() {
+        document.getElementById('diagnosticInterval').disabled = !this.checked;
+    });
+    document.getElementById('inactivityEnabled').addEventListener('change', function() {
+        document.getElementById('inactivityTimeout').disabled = !this.checked;
     });
 
     async function refreshBaseStatus() {

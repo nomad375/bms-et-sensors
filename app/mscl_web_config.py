@@ -145,6 +145,49 @@ RTD_WIRE_LABELS = {
     _wt("rtd_4wire", 2): "4 Wire",
 }
 
+def _build_unit_labels():
+    labels = {}
+    try:
+        for name in dir(mscl.WirelessTypes):
+            if not name.startswith("unit_"):
+                continue
+            try:
+                val = int(getattr(mscl.WirelessTypes, name))
+            except Exception:
+                continue
+            suffix = name.split("unit_", 1)[1].replace("_", " ").strip().lower()
+            compact = suffix.replace(" ", "")
+            if "milliohm" in compact:
+                label = "Milliohm"
+            elif "kiloohm" in compact:
+                label = "Kiloohm"
+            elif compact.endswith("ohm") or "resistance" in compact:
+                label = "Ohm"
+            else:
+                label = suffix.title() if suffix else f"Value {val}"
+            labels[val] = label
+    except Exception:
+        pass
+    return labels
+
+UNIT_LABELS = _build_unit_labels()
+PRIMARY_UNIT_ORDER = ["Ohm", "Milliohm", "Kiloohm"]
+TEMP_UNIT_ORDER = ["Celsius", "Fahrenheit", "Kelvin"]
+
+def _unit_family(label):
+    s = str(label or "").lower().replace(" ", "")
+    if "milliohm" in s:
+        return "Milliohm"
+    if "kiloohm" in s:
+        return "Kiloohm"
+    if "ohm" in s:
+        return "Ohm"
+    return None
+
+def _is_temp_unit(label):
+    s = str(label or "").lower()
+    return ("celsius" in s) or ("fahrenheit" in s) or ("kelvin" in s)
+
 def _get_temp_sensor_options(node):
     errs = []
     for getter in (
@@ -271,6 +314,11 @@ def ensure_beacon_on():
 def ch1_mask():
     mask = mscl.ChannelMask()
     mask.enable(1)
+    return mask
+
+def ch2_mask():
+    mask = mscl.ChannelMask()
+    mask.enable(2)
     return mask
 
 def set_idle_with_retry(node, node_id, stage_tag, attempts=2, delay_sec=0.8, required=False):
@@ -869,6 +917,108 @@ def api_read(node_id):
                 if current_low_pass is None and low_pass_options:
                     current_low_pass = int(low_pass_options[0]["value"])
 
+                current_unit = cached.get("current_unit")
+                unit_options = cached.get("unit_options", [])
+                if refresh_eeprom or "current_unit" not in cached:
+                    try:
+                        current_unit = int(node.getUnit(ch1_mask()))
+                    except Exception as e:
+                        log(f"[mscl-web] [{read_tag}] warn node_id={node_id}: getUnit(ch1) failed: {e}")
+                        try:
+                            current_unit = int(node.getUnit())
+                        except Exception:
+                            pass
+                if refresh_eeprom or not unit_options:
+                    try:
+                        features = node.features()
+                        values = []
+                        for getter in (lambda: features.units(ch1_mask()), lambda: features.units()):
+                            try:
+                                values = getter()
+                                if values:
+                                    break
+                            except Exception:
+                                continue
+                        unit_options = []
+                        for v in values:
+                            vi = int(v)
+                            unit_options.append({"value": vi, "label": UNIT_LABELS.get(vi, f"Value {vi}")})
+                    except Exception as e:
+                        log(f"[mscl-web] [{read_tag}] warn node_id={node_id}: features/units failed: {e}")
+                # SensorConnect-like behavior: keep core engineering units visible.
+                if len(unit_options) <= 1:
+                    existing = {int(x.get("value")) for x in unit_options if x.get("value") is not None}
+                    for target_label in PRIMARY_UNIT_ORDER:
+                        for unit_val, unit_label in UNIT_LABELS.items():
+                            if _unit_family(unit_label) == target_label and int(unit_val) not in existing:
+                                unit_options.append({"value": int(unit_val), "label": unit_label})
+                                existing.add(int(unit_val))
+                                break
+                if unit_options:
+                    unit_options.sort(
+                        key=lambda x: (
+                            PRIMARY_UNIT_ORDER.index(_unit_family(x.get("label"))) if _unit_family(x.get("label")) in PRIMARY_UNIT_ORDER else 99,
+                            str(x.get("label")),
+                            int(x.get("value", 999999)),
+                        )
+                    )
+                if current_unit is not None and all(x.get("value") != int(current_unit) for x in unit_options):
+                    unit_options.insert(0, {"value": int(current_unit), "label": UNIT_LABELS.get(int(current_unit), f"Value {int(current_unit)}")})
+                if not unit_options and current_unit is not None:
+                    unit_options = [{"value": int(current_unit), "label": UNIT_LABELS.get(int(current_unit), f"Value {int(current_unit)}")}]
+
+                current_cjc_unit = cached.get("current_cjc_unit")
+                cjc_unit_options = cached.get("cjc_unit_options", [])
+                if refresh_eeprom or "current_cjc_unit" not in cached:
+                    try:
+                        current_cjc_unit = int(node.getUnit(ch2_mask()))
+                    except Exception as e:
+                        log(f"[mscl-web] [{read_tag}] warn node_id={node_id}: getUnit(ch2) failed: {e}")
+                if refresh_eeprom or not cjc_unit_options:
+                    try:
+                        features = node.features()
+                        values = []
+                        for getter in (lambda: features.units(ch2_mask()), lambda: features.units()):
+                            try:
+                                values = getter()
+                                if values:
+                                    break
+                            except Exception:
+                                continue
+                        cjc_unit_options = []
+                        for v in values:
+                            vi = int(v)
+                            lbl = UNIT_LABELS.get(vi, f"Value {vi}")
+                            if _is_temp_unit(lbl):
+                                cjc_unit_options.append({"value": vi, "label": lbl})
+                    except Exception as e:
+                        log(f"[mscl-web] [{read_tag}] warn node_id={node_id}: features/units(ch2) failed: {e}")
+                if len(cjc_unit_options) <= 1:
+                    existing = {int(x.get("value")) for x in cjc_unit_options if x.get("value") is not None}
+                    for target_label in TEMP_UNIT_ORDER:
+                        for unit_val, unit_label in UNIT_LABELS.items():
+                            if (target_label.lower() in str(unit_label).lower()) and int(unit_val) not in existing:
+                                cjc_unit_options.append({"value": int(unit_val), "label": unit_label})
+                                existing.add(int(unit_val))
+                                break
+                if cjc_unit_options:
+                    cjc_unit_options.sort(
+                        key=lambda x: (
+                            TEMP_UNIT_ORDER.index(next((t for t in TEMP_UNIT_ORDER if t.lower() in str(x.get("label", "")).lower()), TEMP_UNIT_ORDER[0]))
+                            if any(t.lower() in str(x.get("label", "")).lower() for t in TEMP_UNIT_ORDER) else 99,
+                            str(x.get("label")),
+                            int(x.get("value", 999999)),
+                        )
+                    )
+                if current_cjc_unit is not None and all(x.get("value") != int(current_cjc_unit) for x in cjc_unit_options):
+                    lbl = UNIT_LABELS.get(int(current_cjc_unit), f"Value {int(current_cjc_unit)}")
+                    if _is_temp_unit(lbl):
+                        cjc_unit_options.insert(0, {"value": int(current_cjc_unit), "label": lbl})
+                if not cjc_unit_options and current_cjc_unit is not None:
+                    lbl = UNIT_LABELS.get(int(current_cjc_unit), f"Value {int(current_cjc_unit)}")
+                    if _is_temp_unit(lbl):
+                        cjc_unit_options = [{"value": int(current_cjc_unit), "label": lbl}]
+
                 current_storage_limit_mode = cached.get("current_storage_limit_mode")
                 storage_limit_options = cached.get("storage_limit_options", [])
                 try:
@@ -905,6 +1055,7 @@ def api_read(node_id):
                     log(f"[mscl-web] [{read_tag}] warn node_id={node_id}: getLostBeaconTimeout failed: {e}")
                 if current_lost_beacon_timeout is None:
                     current_lost_beacon_timeout = 2
+                current_lost_beacon_enabled = bool(int(current_lost_beacon_timeout) > 0)
 
                 current_diagnostic_interval = cached.get("current_diagnostic_interval")
                 try:
@@ -913,6 +1064,7 @@ def api_read(node_id):
                     log(f"[mscl-web] [{read_tag}] warn node_id={node_id}: getDiagnosticInterval failed: {e}")
                 if current_diagnostic_interval is None:
                     current_diagnostic_interval = 60
+                current_diagnostic_enabled = bool(int(current_diagnostic_interval) > 0)
 
                 supports_transducer_type = cached.get("supports_transducer_type")
                 supports_temp_sensor_options = cached.get("supports_temp_sensor_options")
@@ -989,7 +1141,6 @@ def api_read(node_id):
                         supports_inactivity_timeout = True
                     except Exception as e:
                         log(f"[mscl-web] [{read_tag}] warn node_id={node_id}: getInactivityTimeout failed: {e}")
-
                     try:
                         current_check_radio_interval = int(node.getCheckRadioInterval())
                         supports_check_radio_interval = True
@@ -1088,6 +1239,7 @@ def api_read(node_id):
                     channels = cached.get("channels")
                 else:
                     channels = [{"id": 1, "enabled": True}, {"id": 2, "enabled": False}]
+                current_inactivity_enabled = bool((current_inactivity_timeout is not None) and (int(current_inactivity_timeout) > 0))
         
                 payload = dict(
                     success=True, model=model, sn=sn, fw=fw,
@@ -1095,13 +1247,17 @@ def api_read(node_id):
                     node_address=node_address, frequency=frequency,
                     storage_pct=storage_pct, sampling_mode=sampling_mode, sampling_mode_raw=sampling_mode_raw, data_mode=data_mode,
                     current_input_range=current_input_range, supported_input_ranges=supported_input_ranges,
+                    current_unit=current_unit, unit_options=unit_options,
+                    current_cjc_unit=current_cjc_unit, cjc_unit_options=cjc_unit_options,
                     current_rate=current_rate, current_power=current_power, current_power_enum=current_power_enum,
                     comm_protocol=comm_protocol, comm_protocol_text=comm_protocol_text,
                     supported_rates=supported_rates, channels=channels,
                     current_low_pass=current_low_pass, low_pass_options=low_pass_options,
                     current_storage_limit_mode=current_storage_limit_mode, storage_limit_options=storage_limit_options,
                     current_lost_beacon_timeout=current_lost_beacon_timeout,
+                    current_lost_beacon_enabled=current_lost_beacon_enabled,
                     current_diagnostic_interval=current_diagnostic_interval,
+                    current_diagnostic_enabled=current_diagnostic_enabled,
                     supports_default_mode=bool(supports_default_mode),
                     supports_inactivity_timeout=bool(supports_inactivity_timeout),
                     supports_check_radio_interval=bool(supports_check_radio_interval),
@@ -1109,6 +1265,7 @@ def api_read(node_id):
                     supports_temp_sensor_options=bool(supports_temp_sensor_options),
                     current_default_mode=current_default_mode,
                     current_inactivity_timeout=current_inactivity_timeout,
+                    current_inactivity_enabled=current_inactivity_enabled,
                     current_check_radio_interval=current_check_radio_interval,
                     default_mode_options=default_mode_options,
                     current_transducer_type=current_transducer_type,
@@ -1338,17 +1495,34 @@ def api_write():
                         return int(v)
                     except Exception:
                         return None
+                def _to_opt_bool(v):
+                    if isinstance(v, bool):
+                        return v
+                    if isinstance(v, str):
+                        s = v.strip().lower()
+                        if s in ("1", "true", "yes", "on"):
+                            return True
+                        if s in ("0", "false", "no", "off", ""):
+                            return False
+                    if isinstance(v, (int, float)):
+                        return bool(v)
+                    return False
 
                 sample_rate = _to_opt_int(data.get('sample_rate'))
                 tx_power = _to_opt_int(data.get('tx_power'))
                 channels = data.get('channels')
                 input_range = _to_opt_int(data.get('input_range'))
+                unit = _to_opt_int(data.get('unit'))
+                cjc_unit = _to_opt_int(data.get('cjc_unit'))
                 low_pass_filter = _to_opt_int(data.get('low_pass_filter'))
                 storage_limit_mode = _to_opt_int(data.get('storage_limit_mode'))
                 lost_beacon_timeout = _to_opt_int(data.get('lost_beacon_timeout'))
                 diagnostic_interval = _to_opt_int(data.get('diagnostic_interval'))
+                lost_beacon_enabled = _to_opt_bool(data.get('lost_beacon_enabled'))
+                diagnostic_enabled = _to_opt_bool(data.get('diagnostic_enabled'))
                 default_mode = _to_opt_int(data.get('default_mode'))
                 inactivity_timeout = _to_opt_int(data.get('inactivity_timeout'))
+                inactivity_enabled = _to_opt_bool(data.get('inactivity_enabled'))
                 check_radio_interval = _to_opt_int(data.get('check_radio_interval'))
                 transducer_type = _to_opt_int(data.get('transducer_type'))
                 sensor_type = _to_opt_int(data.get('sensor_type'))
@@ -1361,26 +1535,36 @@ def api_write():
                         tx_power = cached.get('current_power')
                     if input_range is None:
                         input_range = cached.get('current_input_range')
+                    if unit is None:
+                        unit = cached.get('current_unit')
+                    if cjc_unit is None:
+                        cjc_unit = cached.get('current_cjc_unit')
                     if low_pass_filter is None:
                         low_pass_filter = cached.get('current_low_pass')
-                    if storage_limit_mode is None:
-                        storage_limit_mode = cached.get('current_storage_limit_mode')
-                    if lost_beacon_timeout is None:
-                        lost_beacon_timeout = cached.get('current_lost_beacon_timeout')
-                    if diagnostic_interval is None:
-                        diagnostic_interval = cached.get('current_diagnostic_interval')
+                if storage_limit_mode is None:
+                    storage_limit_mode = cached.get('current_storage_limit_mode')
+                if lost_beacon_timeout is None:
+                    lost_beacon_timeout = cached.get('current_lost_beacon_timeout')
+                if diagnostic_interval is None:
+                    diagnostic_interval = cached.get('current_diagnostic_interval')
                     if default_mode is None:
                         default_mode = cached.get('current_default_mode')
                     if inactivity_timeout is None:
                         inactivity_timeout = cached.get('current_inactivity_timeout')
-                    if check_radio_interval is None:
-                        check_radio_interval = cached.get('current_check_radio_interval')
+                if check_radio_interval is None:
+                    check_radio_interval = cached.get('current_check_radio_interval')
                     if transducer_type is None:
                         transducer_type = cached.get('current_transducer_type')
                     if sensor_type is None:
                         sensor_type = cached.get('current_sensor_type')
                     if wire_type is None:
                         wire_type = cached.get('current_wire_type')
+                if 'lost_beacon_enabled' not in data:
+                    lost_beacon_enabled = bool((lost_beacon_timeout is not None) and (int(lost_beacon_timeout) > 0))
+                if 'diagnostic_enabled' not in data:
+                    diagnostic_enabled = bool((diagnostic_interval is not None) and (int(diagnostic_interval) > 0))
+                if 'inactivity_enabled' not in data:
+                    inactivity_enabled = bool((inactivity_timeout is not None) and (int(inactivity_timeout) > 0))
                 if sample_rate is None:
                     return jsonify(success=False, error="Sample Rate is unknown. Run FULL READ once or set node in SensorConnect.")
                 if tx_power is None:
@@ -1436,6 +1620,48 @@ def api_write():
                         if not ir_set:
                             raise RuntimeError("Input Range not set: " + " | ".join(ir_errs))
 
+                    if unit is not None:
+                        unit_set = False
+                        unit_errs = []
+                        for setter in (
+                            lambda: cfg.unit(ch1_mask(), int(unit)),
+                            lambda: cfg.unit(int(unit)),
+                        ):
+                            try:
+                                setter()
+                                unit_set = True
+                                break
+                            except Exception as e:
+                                unit_errs.append(str(e))
+                        if not unit_set:
+                            log(f"[mscl-web] Write warn node_id={data.get('node_id')}: unit not set: {' | '.join(unit_errs)}")
+                        else:
+                            unit_label = UNIT_LABELS.get(int(unit), f"Value {int(unit)}")
+                            log(
+                                f"[mscl-web] Write unit node_id={data.get('node_id')}: "
+                                f"requested={unit_label} ({int(unit)})"
+                            )
+                    if cjc_unit is not None:
+                        cjc_set = False
+                        cjc_errs = []
+                        for setter in (
+                            lambda: cfg.unit(ch2_mask(), int(cjc_unit)),
+                        ):
+                            try:
+                                setter()
+                                cjc_set = True
+                                break
+                            except Exception as e:
+                                cjc_errs.append(str(e))
+                        if not cjc_set:
+                            log(f"[mscl-web] Write warn node_id={data.get('node_id')}: cjc_unit not set: {' | '.join(cjc_errs)}")
+                        else:
+                            cjc_label = UNIT_LABELS.get(int(cjc_unit), f"Value {int(cjc_unit)}")
+                            log(
+                                f"[mscl-web] Write cjc-unit node_id={data.get('node_id')}: "
+                                f"requested={cjc_label} ({int(cjc_unit)})"
+                            )
+
                     if low_pass_filter is not None:
                         lp_set = False
                         lp_errs = []
@@ -1456,9 +1682,19 @@ def api_write():
                     if storage_limit_mode is not None:
                         cfg.storageLimitMode(int(storage_limit_mode))
                     if lost_beacon_timeout is not None:
-                        cfg.lostBeaconTimeout(int(lost_beacon_timeout))
+                        try:
+                            cfg.lostBeaconTimeout(0 if not lost_beacon_enabled else int(lost_beacon_timeout))
+                        except Exception as e:
+                            if lost_beacon_enabled:
+                                raise
+                            log(f"[mscl-web] Write warn node_id={data.get('node_id')}: lostBeaconTimeout off not set: {e}")
                     if diagnostic_interval is not None:
-                        cfg.diagnosticInterval(int(diagnostic_interval))
+                        try:
+                            cfg.diagnosticInterval(0 if not diagnostic_enabled else int(diagnostic_interval))
+                        except Exception as e:
+                            if diagnostic_enabled:
+                                raise
+                            log(f"[mscl-web] Write warn node_id={data.get('node_id')}: diagnosticInterval off not set: {e}")
 
                     # SensorConnect-style behavior: try setters even when supports* reports NO.
                     nonlocal supports_default_mode, supports_inactivity_timeout, supports_check_radio_interval
@@ -1471,10 +1707,13 @@ def api_write():
                             log(f"[mscl-web] Write warn node_id={data.get('node_id')}: defaultMode not set: {e}")
                     if inactivity_timeout is not None:
                         try:
-                            cfg.inactivityTimeout(int(inactivity_timeout))
+                            cfg.inactivityTimeout(0 if not inactivity_enabled else int(inactivity_timeout))
                             supports_inactivity_timeout = True
                         except Exception as e:
-                            log(f"[mscl-web] Write warn node_id={data.get('node_id')}: inactivityTimeout not set: {e}")
+                            if inactivity_enabled:
+                                log(f"[mscl-web] Write warn node_id={data.get('node_id')}: inactivityTimeout not set: {e}")
+                            else:
+                                log(f"[mscl-web] Write warn node_id={data.get('node_id')}: inactivityTimeout off not set: {e}")
                     if check_radio_interval is not None:
                         try:
                             cfg.checkRadioInterval(int(check_radio_interval))
@@ -1551,12 +1790,22 @@ def api_write():
                                 write_hw_effective["transducer_type"] = hw_effective["transducer_type"]
                                 write_hw_effective["sensor_type"] = hw_effective["sensor_type"]
                                 write_hw_effective["wire_type"] = hw_effective["wire_type"]
-                                log(
-                                    f"[mscl-web] Write hardware node_id={data.get('node_id')}: "
-                                    f"requested(transducer={transducer_type}, sensor={sensor_type}, wire={wire_type}) "
-                                    f"effective(transducer={hw_effective['transducer_type']}, "
-                                    f"sensor={hw_effective['sensor_type']}, wire={hw_effective['wire_type']})"
-                                )
+                                requested_hw = {
+                                    "transducer_type": (int(transducer_type) if transducer_type is not None else None),
+                                    "sensor_type": (int(sensor_type) if sensor_type is not None else None),
+                                    "wire_type": (int(wire_type) if wire_type is not None else None),
+                                }
+                                if (
+                                    (requested_hw["transducer_type"] is not None and requested_hw["transducer_type"] != hw_effective["transducer_type"]) or
+                                    (requested_hw["sensor_type"] is not None and requested_hw["sensor_type"] != hw_effective["sensor_type"]) or
+                                    (requested_hw["wire_type"] is not None and requested_hw["wire_type"] != hw_effective["wire_type"])
+                                ):
+                                    log(
+                                        f"[mscl-web] Write hardware node_id={data.get('node_id')}: "
+                                        f"requested(transducer={requested_hw['transducer_type']}, sensor={requested_hw['sensor_type']}, wire={requested_hw['wire_type']}) "
+                                        f"effective(transducer={hw_effective['transducer_type']}, "
+                                        f"sensor={hw_effective['sensor_type']}, wire={hw_effective['wire_type']})"
+                                    )
                         except Exception as e:
                             log(f"[mscl-web] Write warn node_id={data.get('node_id')}: tempSensorOptions flow failed: {e}")
                     return cfg
@@ -1580,18 +1829,22 @@ def api_write():
                 cached['current_power_enum'] = int(tx_enum)
                 if input_range is not None:
                     cached['current_input_range'] = int(input_range)
+                if unit is not None:
+                    cached['current_unit'] = int(unit)
+                if cjc_unit is not None:
+                    cached['current_cjc_unit'] = int(cjc_unit)
                 if low_pass_filter is not None:
                     cached['current_low_pass'] = int(low_pass_filter)
                 if storage_limit_mode is not None:
                     cached['current_storage_limit_mode'] = int(storage_limit_mode)
                 if lost_beacon_timeout is not None:
-                    cached['current_lost_beacon_timeout'] = int(lost_beacon_timeout)
+                    cached['current_lost_beacon_timeout'] = (0 if not lost_beacon_enabled else int(lost_beacon_timeout))
                 if diagnostic_interval is not None:
-                    cached['current_diagnostic_interval'] = int(diagnostic_interval)
+                    cached['current_diagnostic_interval'] = (0 if not diagnostic_enabled else int(diagnostic_interval))
                 if supports_default_mode and default_mode is not None:
                     cached['current_default_mode'] = int(default_mode)
                 if supports_inactivity_timeout and inactivity_timeout is not None:
-                    cached['current_inactivity_timeout'] = int(inactivity_timeout)
+                    cached['current_inactivity_timeout'] = (0 if not inactivity_enabled else int(inactivity_timeout))
                 if supports_check_radio_interval and check_radio_interval is not None:
                     cached['current_check_radio_interval'] = int(check_radio_interval)
                 if supports_transducer_type:
