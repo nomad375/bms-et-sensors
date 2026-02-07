@@ -241,6 +241,7 @@ def send_idle_sensorconnect_style(node, node_id, stage_tag):
     state_confirmed = False
     state_text = None
     last_reason = "not completed"
+    idle_result = "pending"
 
     try:
         status = node.setToIdle()
@@ -248,6 +249,7 @@ def send_idle_sensorconnect_style(node, node_id, stage_tag):
         log(f"[mscl-web] [PREP-IDLE] {stage_tag} node setToIdle started node_id={node_id}")
     except Exception as e:
         last_reason = f"setToIdle failed: {e}"
+        idle_result = "failed"
         log(f"[mscl-web] [PREP-IDLE] {stage_tag} node setToIdle failed node_id={node_id}: {e}")
         return {
             "command_sent": command_sent,
@@ -255,6 +257,7 @@ def send_idle_sensorconnect_style(node, node_id, stage_tag):
             "state_confirmed": state_confirmed,
             "state_text": state_text,
             "reason": last_reason,
+            "idle_result": idle_result,
         }
 
     complete = False
@@ -278,6 +281,7 @@ def send_idle_sensorconnect_style(node, node_id, stage_tag):
             "state_confirmed": False,
             "state_text": state_text,
             "reason": last_reason,
+            "idle_result": idle_result,
         }
 
     try:
@@ -289,15 +293,19 @@ def send_idle_sensorconnect_style(node, node_id, stage_tag):
             state_confirmed = True
             state_text = "Idle"
             last_reason = "confirmed:status.result=success"
+            idle_result = "success"
             log(f"[mscl-web] [PREP-IDLE] {stage_tag} confirmed node_id={node_id} by status.result")
         elif canceled_val is not None and result == canceled_val:
             last_reason = "status.result=canceled"
+            idle_result = "canceled"
             log(f"[mscl-web] [PREP-IDLE] {stage_tag} canceled node_id={node_id}")
         else:
             last_reason = f"status.result={result}"
+            idle_result = "failed"
             log(f"[mscl-web] [PREP-IDLE] {stage_tag} not-confirmed node_id={node_id} ({last_reason})")
     except Exception as e:
         last_reason = f"status.result failed: {e}"
+        idle_result = "failed"
         log(f"[mscl-web] [PREP-IDLE] {stage_tag} result read failed node_id={node_id}: {e}")
 
     return {
@@ -306,6 +314,7 @@ def send_idle_sensorconnect_style(node, node_id, stage_tag):
         "state_confirmed": state_confirmed,
         "state_text": state_text,
         "reason": last_reason,
+        "idle_result": idle_result,
     }
 
 def _start_sampling_best_effort(node, node_id):
@@ -922,14 +931,15 @@ def api_node_idle(node_id):
             sent = bool(idle_status.get("command_sent"))
             confirmed = bool(idle_status.get("state_confirmed"))
             reason = idle_status.get("reason") or "unknown"
+            idle_result = idle_status.get("idle_result") or ("success" if confirmed else "pending")
             if not sent:
                 log(f"[mscl-web] [PREP-IDLE] failed node_id={node_id} reason={reason}")
-                return jsonify(success=False, error=reason, idle_confirmed=False, idle_status=idle_status)
+                return jsonify(success=False, error=reason, idle_confirmed=False, idle_result=idle_result, idle_status=idle_status)
             if confirmed:
                 log(f"[mscl-web] [PREP-IDLE] success node_id={node_id}")
-                return jsonify(success=True, message="Node set to Idle", idle_confirmed=True, reason=reason, idle_status=idle_status)
+                return jsonify(success=True, message="Node set to Idle", idle_confirmed=True, idle_result=idle_result, reason=reason, idle_status=idle_status)
             log(f"[mscl-web] [PREP-IDLE] pending node_id={node_id} reason={reason}")
-            return jsonify(success=True, message="Idle command sent", idle_confirmed=False, reason=reason, idle_status=idle_status)
+            return jsonify(success=True, message="Idle command sent", idle_confirmed=False, idle_result=idle_result, reason=reason, idle_status=idle_status)
         except Exception as e:
             log(f"[mscl-web] [PREP-IDLE] failed node_id={node_id}: {e}")
             return jsonify(success=False, error=str(e))

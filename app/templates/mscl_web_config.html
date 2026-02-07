@@ -472,20 +472,21 @@
             const res = await fetch(`/api/node_idle/${id}`, {method:'POST'});
             const data = await res.json();
             const st = data.idle_status || {};
+            const idleResult = String(data.idle_result || st.idle_result || "pending");
             const sent = st.command_sent === true ? "sent" : "not-sent";
             const link = st.transport_alive === true ? "alive" : "no-link";
             const confirmed = st.state_confirmed === true ? "confirmed" : "pending";
             if (!data.success) {
                 statusDiv.className = "mt-2 text-center status-err";
-                statusDiv.innerHTML = `❌ ${data.error || 'Set to Idle failed'} | cmd:${sent} | link:${link} | idle:${confirmed}`;
+                statusDiv.innerHTML = `❌ Idle result: ${idleResult} | ${data.error || 'Set to Idle failed'} | cmd:${sent} | link:${link} | idle:${confirmed}`;
                 markIdleState(false);
             } else if (data.idle_confirmed) {
                 statusDiv.className = "mt-2 text-center status-ok";
-                statusDiv.innerHTML = `✅ Idle confirmed | cmd:${sent} | link:${link} | idle:${confirmed}`;
+                statusDiv.innerHTML = `✅ Idle result: ${idleResult} | Idle confirmed | cmd:${sent} | link:${link} | idle:${confirmed}`;
                 markIdleState(true);
             } else {
                 statusDiv.className = "mt-2 text-center status-warn";
-                statusDiv.innerHTML = `⚠️ Idle pending (${data.reason || 'pending'}) | cmd:${sent} | link:${link} | idle:${confirmed}`;
+                statusDiv.innerHTML = `⚠️ Idle result: ${idleResult} (${data.reason || 'pending'}) | cmd:${sent} | link:${link} | idle:${confirmed}`;
                 markIdleState(false);
             }
         } catch (e) {
