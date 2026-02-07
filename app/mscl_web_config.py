@@ -37,6 +37,9 @@ NEXT_PING_ALLOWED_TS = 0
 CURRENT_PORT = None
 LAST_CONNECT_ATTEMPT_TS = 0
 CONNECT_MIN_INTERVAL_SEC = 2.0
+NODE_READ_CACHE = {}
+NODE_EEPROM_REFRESH_SEC = 45
+BASE_BEACON_STATE = None
 
 def log(msg):
     print(msg, flush=True)
@@ -59,7 +62,7 @@ def find_port():
     return ports[0] if ports else None
 
 def internal_connect(force_ping=False):
-    global BASE_STATION, LAST_PING_OK_TS, NEXT_PING_ALLOWED_TS, CURRENT_PORT, LAST_CONNECT_ATTEMPT_TS
+    global BASE_STATION, LAST_PING_OK_TS, NEXT_PING_ALLOWED_TS, CURRENT_PORT, LAST_CONNECT_ATTEMPT_TS, BASE_BEACON_STATE
     now = time.time()
     with CONNECT_LOCK:
         if BASE_STATION and not force_ping:
@@ -89,6 +92,7 @@ def internal_connect(force_ping=False):
             if station.ping():
                 BASE_STATION = station
                 BASE_STATION.enableBeacon()
+                BASE_BEACON_STATE = True
                 LAST_PING_OK_TS = now
                 CURRENT_PORT = port
                 LAST_BASE_STATUS.update({"connected": True, "port": port, "message": "OK", "ts": time.strftime("%H:%M:%S")})
@@ -103,6 +107,19 @@ def internal_connect(force_ping=False):
             log(f"[mscl-web] BaseStation connect error: {e}")
             time.sleep(CONNECT_BACKOFF_SEC)
             return False, str(e)
+
+def ensure_beacon_on():
+    global BASE_BEACON_STATE
+    if BASE_STATION is None:
+        return
+    if BASE_BEACON_STATE is True:
+        return
+    try:
+        BASE_STATION.enableBeacon()
+        BASE_BEACON_STATE = True
+        log("[mscl-web] [BEACON] auto-enabled for node communication")
+    except Exception as e:
+        log(f"[mscl-web] [BEACON] auto-enable failed: {e}")
 
 @app.route('/')
 def index(): return render_template_string(TEMPLATE_PATH.read_text())
@@ -170,6 +187,7 @@ def api_status():
             connected=bool(ok),
             port=port,
             message=msg,
+            beacon_state=BASE_BEACON_STATE,
             ts=LAST_BASE_STATUS.get("ts"),
             base_model=base_model,
             base_fw=base_fw,
@@ -182,12 +200,48 @@ def api_status():
 
 @app.route('/api/reconnect', methods=['POST'])
 def api_reconnect():
-    global BASE_STATION, LAST_PING_OK_TS
+    global BASE_STATION, LAST_PING_OK_TS, BASE_BEACON_STATE
     with OP_LOCK:
         BASE_STATION = None
+        BASE_BEACON_STATE = None
         LAST_PING_OK_TS = 0
         ok, msg = internal_connect(force_ping=True)
         return jsonify(success=bool(ok), message=msg)
+
+@app.route('/api/beacon', methods=['POST'])
+def api_beacon():
+    global BASE_STATION, BASE_BEACON_STATE
+    with OP_LOCK:
+        ok, msg = internal_connect()
+        if not ok or BASE_STATION is None:
+            return jsonify(success=False, error=f"Base station not connected: {msg}")
+        body = request.json or {}
+        requested = body.get("enabled", None)
+        if requested is None:
+            target = not bool(BASE_BEACON_STATE)
+        else:
+            target = bool(requested)
+        try:
+            if target:
+                BASE_STATION.enableBeacon()
+                BASE_BEACON_STATE = True
+                log("[mscl-web] [BEACON] enabled")
+                return jsonify(success=True, beacon_state=True, message="Beacon ON")
+            disable_methods = ("disableBeacon", "setBeaconOff")
+            disabled = False
+            for m in disable_methods:
+                fn = getattr(BASE_STATION, m, None)
+                if callable(fn):
+                    fn()
+                    disabled = True
+                    break
+            if not disabled:
+                return jsonify(success=False, error="Beacon OFF is not supported by this MSCL API build")
+            BASE_BEACON_STATE = False
+            log("[mscl-web] [BEACON] disabled")
+            return jsonify(success=True, beacon_state=False, message="Beacon OFF")
+        except Exception as e:
+            return jsonify(success=False, error=str(e))
 
 @app.route('/api/diagnostics/<int:node_id>')
 def api_diagnostics(node_id):
@@ -224,90 +278,88 @@ def api_logs():
 
 @app.route('/api/read/<int:node_id>')
 def api_read(node_id):
-    global BASE_STATION, RATE_MAP
+    global BASE_STATION, RATE_MAP, NODE_READ_CACHE
+    read_mode = (request.args.get("mode") or "fast").strip().lower()
+    if read_mode not in ("fast", "full"):
+        read_mode = "fast"
+    read_tag = "READ-FULL" if read_mode == "full" else "READ-FAST"
+    max_attempts = 5 if read_mode == "full" else 2
     last_err = None
-    log(f"[mscl-web] Read request node_id={node_id}")
+    log(f"[mscl-web] [{read_tag}] request node_id={node_id}")
     with OP_LOCK:
-        for attempt in range(1, 6):
-            log(f"[mscl-web] Read attempt {attempt}/5 node_id={node_id}")
+        cached = NODE_READ_CACHE.get(node_id, {})
+        now_ts = time.time()
+        cache_age = now_ts - float(cached.get("ts", 0))
+        refresh_eeprom = False if read_mode == "fast" else True
+        for attempt in range(1, max_attempts + 1):
+            log(f"[mscl-web] [{read_tag}] attempt {attempt}/{max_attempts} node_id={node_id}")
             ok, msg = internal_connect()
             if not ok or BASE_STATION is None:
                 last_err = f"Base station not connected: {msg}"
-                log(f"[mscl-web] Read failed: {last_err}")
+                log(f"[mscl-web] [{read_tag}] failed: {last_err}")
                 time.sleep(0.5)
                 continue
             try:
+                ensure_beacon_on()
                 node = mscl.WirelessNode(node_id, BASE_STATION)
                 node.readWriteRetries(15)
         
-                # 1. Принудительная остановка (Auto-Idle before Read)
-                idle_ok = False
-                for idle_attempt in range(1, 3):
-                    try:
-                        log(f"[mscl-web] Read setToIdle attempt {idle_attempt}/2 node_id={node_id}")
-                        node.setToIdle()
-                        time.sleep(2.0)
-                        idle_ok = True
-                        break
-                    except Exception as e:
-                        log(f"[mscl-web] Read setToIdle failed node_id={node_id}: {e}")
-                        time.sleep(1.0)
-                if not idle_ok:
-                    last_err = "Failed to set node to Idle before Read"
-                    continue
+                # Read path should be as non-intrusive as possible.
+                # Do not force Idle before every read; this reduced stability on real hardware.
 
-                # 2. ЧИТАЕМ ТОЛЬКО КРИТИЧЕСКИЕ ДАННЫЕ
-                current_rate = None
-                try:
-                    current_rate = int(node.getSampleRate())
-                except Exception as e:
-                    last_err = str(e)
-                    log(f"[mscl-web] Read warn node_id={node_id}: getSampleRate failed (1st): {last_err}")
-                    time.sleep(1.0)
+                # 2. Critical values (use cache-first for EEPROM-heavy fields)
+                current_rate = cached.get("current_rate")
+                if read_mode == "full" and (refresh_eeprom or current_rate is None):
                     try:
                         current_rate = int(node.getSampleRate())
-                    except Exception as e2:
-                        last_err = str(e2)
-                        log(f"[mscl-web] Read error node_id={node_id}: getSampleRate failed (2nd): {last_err}")
-                        if "EEPROM" in last_err:
-                            # Continue with partial data
-                            current_rate = None
-                        else:
-                            BASE_STATION = None
-                            LAST_PING_OK_TS = 0
-                            time.sleep(0.5)
-                            continue
+                    except Exception as e:
+                        last_err = str(e)
+                        log(f"[mscl-web] [{read_tag}] warn node_id={node_id}: getSampleRate failed (1st): {last_err}")
+                        time.sleep(1.0)
+                        try:
+                            current_rate = int(node.getSampleRate())
+                        except Exception as e2:
+                            last_err = str(e2)
+                            log(f"[mscl-web] [{read_tag}] error node_id={node_id}: getSampleRate failed (2nd): {last_err}")
+                            if "EEPROM" not in last_err:
+                                BASE_STATION = None
+                                LAST_PING_OK_TS = 0
+                                time.sleep(0.5)
+                                continue
                 try:
                     active_mask = node.getActiveChannels()
                 except Exception:
                     active_mask = None
         
                 # 3. Остальные поля — best-effort (не ломаем чтение при EEPROM ошибках)
-                try:
-                    model = node.model()
-                except Exception as e:
-                    model = "TC-Link-200"
-                    log(f"[mscl-web] Read warn node_id={node_id}: model read failed: {e}")
+                model = cached.get("model", "TC-Link-200")
+                if read_mode == "full" and (refresh_eeprom or "model" not in cached):
+                    try:
+                        model = node.model()
+                    except Exception as e:
+                        log(f"[mscl-web] [{read_tag}] warn node_id={node_id}: model read failed: {e}")
         
+                sn = cached.get("sn", "N/A")
                 try:
                     sn = str(node.nodeAddress())
                 except Exception as e:
-                    sn = "N/A"
-                    log(f"[mscl-web] Read warn node_id={node_id}: serial read failed: {e}")
+                    log(f"[mscl-web] [{read_tag}] warn node_id={node_id}: serial read failed: {e}")
         
-                try:
-                    fw = str(node.firmwareVersion())
-                except Exception as e:
-                    fw = "N/A"
-                    log(f"[mscl-web] Read warn node_id={node_id}: firmware read failed: {e}")
+                fw = cached.get("fw", "N/A")
+                if read_mode == "full" and (refresh_eeprom or "fw" not in cached):
+                    try:
+                        fw = str(node.firmwareVersion())
+                    except Exception as e:
+                        log(f"[mscl-web] [{read_tag}] warn node_id={node_id}: firmware read failed: {e}")
         
-                try: 
-                    p_raw = int(node.getTransmitPower())
-                    p_map = {0: 20, 1: 16, 2: 10, 3: 5, 4: 0}
-                    current_power = p_map.get(p_raw, 20)
-                except Exception as e: 
-                    current_power = 20 # Дефолт при ошибке 94
-                    log(f"[mscl-web] Read warn node_id={node_id}: transmit power read failed: {e}")
+                current_power = cached.get("current_power", 20)
+                if read_mode == "full" and (refresh_eeprom or "current_power" not in cached):
+                    try: 
+                        p_raw = int(node.getTransmitPower())
+                        p_map = {0: 20, 1: 16, 2: 10, 3: 5, 4: 0}
+                        current_power = p_map.get(p_raw, 20)
+                    except Exception as e:
+                        log(f"[mscl-web] [{read_tag}] warn node_id={node_id}: transmit power read failed: {e}")
             
                 # Optional status fields (best-effort)
                 try:
@@ -318,53 +370,100 @@ def api_read(node_id):
                     last_comm = str(node.lastCommunicationTime()).split(".")[0]
                 except Exception:
                     last_comm = None
+                state = None
+                state_text = None
                 try:
-                    state = str(node.lastDeviceState())
+                    raw_state = node.lastDeviceState()
+                    try:
+                        state = int(raw_state)
+                    except Exception:
+                        state = str(raw_state)
+                    state_map = {
+                        0: "Idle",
+                        1: "Sampling",
+                        2: "Sampling",
+                        255: "Unknown",
+                    }
+                    if isinstance(state, int):
+                        state_text = state_map.get(state, f"State {state}")
+                    else:
+                        state_text = str(state)
                 except Exception:
                     state = None
+                    state_text = None
+                try:
+                    node_address = int(node.nodeAddress())
+                except Exception:
+                    node_address = None
+                try:
+                    freq_raw = node.frequency()
+                    try:
+                        freq_ch = int(freq_raw)
+                        frequency = f"{freq_ch} ({2404 + 2 * freq_ch} MHz)"
+                    except Exception:
+                        frequency = str(freq_raw)
+                except Exception:
+                    frequency = None
                 try:
                     storage_pct = round(float(node.percentFull()), 2)
                 except Exception:
                     storage_pct = None
-                try:
-                    sampling_mode_val = node.getSamplingMode()
-                    sampling_mode = "sync" if sampling_mode_val == mscl.WirelessTypes.samplingMode_sync else "non_sync"
-                except Exception:
-                    sampling_mode = None
-                try:
-                    data_mode = str(node.getDataMode())
-                except Exception:
-                    data_mode = None
+                sampling_mode = cached.get("sampling_mode")
+                sampling_mode_raw = cached.get("sampling_mode_raw")
+                if read_mode == "full" and (refresh_eeprom or "sampling_mode" not in cached):
+                    try:
+                        sampling_mode_val = node.getSamplingMode()
+                        try:
+                            sampling_mode_raw = int(sampling_mode_val)
+                        except Exception:
+                            sampling_mode_raw = None
+                        sampling_mode = "sync" if sampling_mode_val == mscl.WirelessTypes.samplingMode_sync else "non_sync"
+                    except Exception:
+                        pass
+                data_mode = cached.get("data_mode")
+                if read_mode == "full" and (refresh_eeprom or "data_mode" not in cached):
+                    try:
+                        data_mode = str(node.getDataMode())
+                    except Exception:
+                        pass
 
                 # Частоты (если доступно)
-                supported_rates = []
-                if current_rate is not None:
-                    supported_rates.append({"enum_val": current_rate, "str_val": RATE_MAP.get(current_rate, str(current_rate) + " Hz")})
-                try:
-                    features = node.features()
-                    rates = features.sampleRates(mscl.WirelessTypes.samplingMode_sync, 1, 0)
-                    supported_rates = []
-                    for r in rates:
-                        rid = int(r)
-                        supported_rates.append({"enum_val": rid, "str_val": RATE_MAP.get(rid, str(rid) + " Hz")})
-                except Exception as e:
-                    log(f"[mscl-web] Read warn node_id={node_id}: features/sampleRates failed: {e}")
+                supported_rates = cached.get("supported_rates", [])
+                if read_mode == "full" and (refresh_eeprom or not supported_rates) and current_rate is not None:
+                    supported_rates = [{"enum_val": current_rate, "str_val": RATE_MAP.get(current_rate, str(current_rate) + " Hz")}]
+                    try:
+                        features = node.features()
+                        rates = features.sampleRates(mscl.WirelessTypes.samplingMode_sync, 1, 0)
+                        supported_rates = []
+                        for r in rates:
+                            rid = int(r)
+                            supported_rates.append({"enum_val": rid, "str_val": RATE_MAP.get(rid, str(rid) + " Hz")})
+                    except Exception as e:
+                        log(f"[mscl-web] [{read_tag}] warn node_id={node_id}: features/sampleRates failed: {e}")
             
                 channels = []
                 if active_mask is not None:
                     for i in range(1, 3):
                         channels.append({"id": i, "enabled": active_mask.enabled(i)})
+                elif isinstance(cached.get("channels"), list) and cached.get("channels"):
+                    channels = cached.get("channels")
+                else:
+                    channels = [{"id": 1, "enabled": True}, {"id": 2, "enabled": False}]
         
-                return jsonify(
+                payload = dict(
                     success=True, model=model, sn=sn, fw=fw,
-                    region=region, last_comm=last_comm, state=state,
-                    storage_pct=storage_pct, sampling_mode=sampling_mode, data_mode=data_mode,
+                    region=region, last_comm=last_comm, state=state, state_text=state_text,
+                    node_address=node_address, frequency=frequency,
+                    storage_pct=storage_pct, sampling_mode=sampling_mode, sampling_mode_raw=sampling_mode_raw, data_mode=data_mode,
                     current_rate=current_rate, current_power=current_power,
                     supported_rates=supported_rates, channels=channels
                 )
+                NODE_READ_CACHE[node_id] = dict(payload, ts=time.time())
+                log(f"[mscl-web] [{read_tag}] success node_id={node_id} sample_rate={payload.get('current_rate')} fw={payload.get('fw')}")
+                return jsonify(**payload)
             except Exception as e:
                 last_err = str(e)
-                log(f"[mscl-web] Read error node_id={node_id}: {e}")
+                log(f"[mscl-web] [{read_tag}] error node_id={node_id}: {e}")
                 if "EEPROM" in last_err:
                     backoff = min(4.0, 0.5 * (2 ** (attempt - 1)))
                     time.sleep(backoff)
@@ -374,9 +473,9 @@ def api_read(node_id):
                 time.sleep(0.5)
                 continue
     if last_err:
-        log(f"[mscl-web] Read failed node_id={node_id}: {last_err}")
+        log(f"[mscl-web] [{read_tag}] failed node_id={node_id}: {last_err}")
     else:
-        log(f"[mscl-web] Read failed node_id={node_id}: Read failed")
+        log(f"[mscl-web] [{read_tag}] failed node_id={node_id}: Read failed")
     return jsonify(success=False, error=last_err or "Read failed")
 
 @app.route('/api/probe/<int:node_id>')
@@ -390,6 +489,7 @@ def api_probe(node_id):
             log(f"[mscl-web] Probe failed: {err}")
             return jsonify(success=False, error=err)
         try:
+            ensure_beacon_on()
             node = mscl.WirelessNode(node_id, BASE_STATION)
             node.readWriteRetries(10)
             # Try to nudge node without touching EEPROM
@@ -414,9 +514,45 @@ def api_probe(node_id):
             log(f"[mscl-web] Probe error node_id={node_id}: {e}")
             return jsonify(success=False, error=str(e))
 
+@app.route('/api/node_idle/<int:node_id>', methods=['POST'])
+def api_node_idle(node_id):
+    global BASE_STATION
+    with OP_LOCK:
+        ok, msg = internal_connect()
+        if not ok or BASE_STATION is None:
+            return jsonify(success=False, error=f"Base station not connected: {msg}")
+        try:
+            ensure_beacon_on()
+            node = mscl.WirelessNode(node_id, BASE_STATION)
+            node.readWriteRetries(10)
+            node.setToIdle()
+            log(f"[mscl-web] [PREP-IDLE] success node_id={node_id}")
+            return jsonify(success=True, message="Node set to Idle")
+        except Exception as e:
+            log(f"[mscl-web] [PREP-IDLE] failed node_id={node_id}: {e}")
+            return jsonify(success=False, error=str(e))
+
+@app.route('/api/node_cycle_power/<int:node_id>', methods=['POST'])
+def api_node_cycle_power(node_id):
+    global BASE_STATION
+    with OP_LOCK:
+        ok, msg = internal_connect()
+        if not ok or BASE_STATION is None:
+            return jsonify(success=False, error=f"Base station not connected: {msg}")
+        try:
+            ensure_beacon_on()
+            node = mscl.WirelessNode(node_id, BASE_STATION)
+            node.readWriteRetries(10)
+            node.cyclePower()
+            log(f"[mscl-web] [PREP-CYCLE] success node_id={node_id}")
+            return jsonify(success=True, message="Power cycle command sent")
+        except Exception as e:
+            log(f"[mscl-web] [PREP-CYCLE] failed node_id={node_id}: {e}")
+            return jsonify(success=False, error=str(e))
+
 @app.route('/api/write', methods=['POST'])
 def api_write():
-    global BASE_STATION
+    global BASE_STATION, NODE_READ_CACHE
     data = request.json
     last_err = None
     last_was_eeprom = False
@@ -435,36 +571,59 @@ def api_write():
                 time.sleep(0.5)
                 continue
             try:
+                ensure_beacon_on()
                 node = mscl.WirelessNode(int(data['node_id']), BASE_STATION)
                 node.readWriteRetries(15)
-                # Auto-Idle before Write
-                idle_ok = False
-                for idle_attempt in range(1, 3):
-                    try:
-                        log(f"[mscl-web] Write setToIdle attempt {idle_attempt}/2 node_id={data.get('node_id')}")
-                        node.setToIdle()
-                        time.sleep(2.5)
-                        idle_ok = True
-                        break
-                    except Exception as e:
-                        log(f"[mscl-web] Write setToIdle failed node_id={data.get('node_id')}: {e}")
-                        time.sleep(1.0)
-                if not idle_ok:
-                    last_err = "Failed to set node to Idle before Write"
-                    continue
+                # Soft gate: only write when node is explicitly in Idle.
+                try:
+                    state_raw = node.lastDeviceState()
+                    state_num = int(state_raw)
+                    if state_num != 0:
+                        err = f"Node state is {state_num}, write allowed only in Idle (0). Use 'Set to Idle' first."
+                        log(f"[mscl-web] [WRITE] blocked node_id={data.get('node_id')}: {err}")
+                        return jsonify(success=False, error=err)
+                except Exception as e:
+                    err = f"Cannot verify node state before write: {e}. Use 'Set to Idle' and retry."
+                    log(f"[mscl-web] [WRITE] blocked node_id={data.get('node_id')}: {err}")
+                    return jsonify(success=False, error=err)
+                sample_rate = data.get('sample_rate')
+                tx_power = data.get('tx_power')
+                channels = data.get('channels')
+                if sample_rate is None or tx_power is None:
+                    cached = NODE_READ_CACHE.get(int(data['node_id']), {})
+                    if sample_rate is None:
+                        sample_rate = cached.get('current_rate')
+                    if tx_power is None:
+                        tx_power = cached.get('current_power')
+                if sample_rate is None:
+                    return jsonify(success=False, error="Sample Rate is unknown. Run FULL READ once or set node in SensorConnect.")
+                if tx_power is None:
+                    tx_power = 20
+                if not isinstance(channels, list):
+                    channels = [1]
+                if len(channels) == 0:
+                    channels = [1]
                 config = mscl.WirelessNodeConfig()
                 config.samplingMode(mscl.WirelessTypes.samplingMode_sync)
-                config.sampleRate(int(data['sample_rate']))
+                config.sampleRate(int(sample_rate))
                 p_map = {20: 0, 16: 1, 10: 2, 5: 3, 0: 4}
-                config.transmitPower(p_map.get(data['tx_power'], 0))
+                config.transmitPower(p_map.get(int(tx_power), 0))
                 full_mask = mscl.ChannelMask()
-                for ch_id in data['channels']:
+                for ch_id in channels:
                     full_mask.enable(ch_id)
                 config.activeChannels(full_mask)
                 node.applyConfig(config)
                 # Avoid pinging immediately after write
                 global NEXT_PING_ALLOWED_TS
                 NEXT_PING_ALLOWED_TS = time.time() + PING_COOLDOWN_SEC
+                # Keep UI stable after write even if subsequent EEPROM reads fail.
+                cached = NODE_READ_CACHE.get(int(data['node_id']), {})
+                cached['current_rate'] = int(sample_rate)
+                cached['current_power'] = int(tx_power)
+                enabled_ids = {int(ch_id) for ch_id in channels}
+                cached['channels'] = [{"id": i, "enabled": (i in enabled_ids)} for i in (1, 2)]
+                cached['ts'] = time.time()
+                NODE_READ_CACHE[int(data['node_id'])] = cached
                 log(f"[mscl-web] Write success node_id={data.get('node_id')}")
                 return jsonify(success=True)
             except Exception as e:
