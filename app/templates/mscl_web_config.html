@@ -69,7 +69,7 @@
             <div class="col-md-4">
                 <div class="input-group">
                     <span class="input-group-text">Node ID</span>
-                    <input type="number" id="nodeId" class="form-control" value="16907">
+                    <input type="number" id="nodeId" class="form-control" value="16904">
                 </div>
             </div>
             <div class="col-md-8 d-flex gap-2 node-actions">
@@ -100,6 +100,26 @@
             </div>
             <div class="border rounded p-3 mb-3 bg-light">
                 <div class="fw-bold text-primary mb-3">Hardware</div>
+                <div class="row mb-3">
+                    <div class="col-md-4">
+                        <label class="form-label fw-bold">Transducer Type</label>
+                        <select id="transducerType" class="form-select">
+                            <option value="">N/A</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label fw-bold">Sensor Type</label>
+                        <select id="sensorType" class="form-select">
+                            <option value="">N/A</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label fw-bold">Wire Type</label>
+                        <select id="wireType" class="form-select">
+                            <option value="">N/A</option>
+                        </select>
+                    </div>
+                </div>
                 <div class="row mb-3">
                     <div class="col-md-6">
                         <label class="form-label fw-bold">Input Range</label>
@@ -151,7 +171,7 @@
 
             <div class="border rounded p-3 mb-4 bg-light">
                 <div class="fw-bold text-primary mb-3">Power</div>
-                <div class="row">
+                <div class="row g-3">
                     <div class="col-md-6">
                         <label class="form-label fw-bold">Radio Power</label>
                         <select id="txPower" class="form-select">
@@ -160,6 +180,20 @@
                             <option value="5">5 dBm</option>
                             <option value="0">0 dBm (Min)</option>
                         </select>
+                    </div>
+                    <div class="col-md-6" id="defaultModeWrap">
+                        <label class="form-label fw-bold">Default Operation Mode</label>
+                        <select id="defaultMode" class="form-select">
+                            <option value="">N/A</option>
+                        </select>
+                    </div>
+                    <div class="col-md-6" id="inactivityTimeoutWrap">
+                        <label class="form-label fw-bold">User Inactivity Timeout (s)</label>
+                        <input id="inactivityTimeout" type="number" min="1" max="65535" class="form-control" value="30">
+                    </div>
+                    <div class="col-md-6" id="checkRadioIntervalWrap">
+                        <label class="form-label fw-bold">Check Radio Interval (s)</label>
+                        <input id="checkRadioInterval" type="number" min="1" max="65535" class="form-control" value="5">
                     </div>
                 </div>
             </div>
@@ -194,6 +228,10 @@
     const LAST_COMM_WARN_SEC = 30;
     const LAST_COMM_CRITICAL_SEC = 120;
     let idleConfirmed = false;
+    let currentRtdSensorOptions = [];
+    let currentThermistorSensorOptions = [];
+    let currentThermocoupleSensorOptions = [];
+    let currentRtdWireOptions = [];
 
     function updateReadWriteButtons() {
         const btnRead = document.getElementById('btnRead');
@@ -205,6 +243,58 @@
     function markIdleState(isIdle) {
         idleConfirmed = !!isIdle;
         updateReadWriteButtons();
+    }
+
+    function renderHardwareDependentOptions() {
+        const trSel = document.getElementById('transducerType');
+        const sensorSel = document.getElementById('sensorType');
+        const wireSel = document.getElementById('wireType');
+        if (!trSel || !sensorSel || !wireSel) return;
+        const transducerVal = parseInt(trSel.value || "", 10);
+
+        sensorSel.innerHTML = "";
+        let sensorOptions = [];
+        if (transducerVal === 0) sensorOptions = currentThermocoupleSensorOptions;
+        else if (transducerVal === 1) sensorOptions = currentRtdSensorOptions;
+        else if (transducerVal === 2) sensorOptions = currentThermistorSensorOptions;
+        if (!sensorOptions.length) {
+            const opt = document.createElement('option');
+            opt.value = "";
+            opt.text = "N/A";
+            opt.selected = true;
+            sensorSel.add(opt);
+        } else {
+            const prev = sensorSel.getAttribute('data-current') || "";
+            sensorOptions.forEach(r => {
+                const opt = document.createElement('option');
+                opt.value = r.value;
+                opt.text = r.label || `Value ${r.value}`;
+                if (String(r.value) === String(prev)) opt.selected = true;
+                sensorSel.add(opt);
+            });
+        }
+
+        wireSel.innerHTML = "";
+        let wireOptions = [];
+        if (transducerVal === 1) wireOptions = currentRtdWireOptions;
+        if (!wireOptions.length) {
+            const opt = document.createElement('option');
+            opt.value = "";
+            opt.text = "N/A";
+            opt.selected = true;
+            wireSel.add(opt);
+            wireSel.disabled = true;
+        } else {
+            const prev = wireSel.getAttribute('data-current') || "";
+            wireOptions.forEach(r => {
+                const opt = document.createElement('option');
+                opt.value = r.value;
+                opt.text = r.label || `Value ${r.value}`;
+                if (String(r.value) === String(prev)) opt.selected = true;
+                wireSel.add(opt);
+            });
+            wireSel.disabled = false;
+        }
     }
 
     async function connectBase() {
@@ -309,6 +399,91 @@
                 }
                 document.getElementById('lostBeaconTimeout').value = (data.current_lost_beacon_timeout ?? 2);
                 document.getElementById('diagnosticInterval').value = (data.current_diagnostic_interval ?? 60);
+                const supportsDefaultMode = !!data.supports_default_mode;
+                const supportsInactivityTimeout = !!data.supports_inactivity_timeout;
+                const supportsCheckRadioInterval = !!data.supports_check_radio_interval;
+                const supportsTransducerType = !!data.supports_transducer_type;
+                const supportsTempSensorOptions = !!data.supports_temp_sensor_options;
+                const trSel = document.getElementById('transducerType');
+                trSel.innerHTML = "";
+                const trOptions = Array.isArray(data.transducer_options) ? data.transducer_options : [];
+                if (!trOptions.length) {
+                    const opt = document.createElement('option');
+                    opt.value = "";
+                    opt.text = "N/A";
+                    opt.selected = true;
+                    trSel.add(opt);
+                } else {
+                    trOptions.forEach(r => {
+                        const opt = document.createElement('option');
+                        opt.value = r.value;
+                        opt.text = r.label || `Value ${r.value}`;
+                        if (String(r.value) === String(data.current_transducer_type)) opt.selected = true;
+                        trSel.add(opt);
+                    });
+                }
+                trSel.disabled = !supportsTransducerType;
+                trSel.onchange = renderHardwareDependentOptions;
+
+                currentRtdSensorOptions = Array.isArray(data.rtd_sensor_options) ? data.rtd_sensor_options : [];
+                currentThermistorSensorOptions = Array.isArray(data.thermistor_sensor_options) ? data.thermistor_sensor_options : [];
+                currentThermocoupleSensorOptions = Array.isArray(data.thermocouple_sensor_options) ? data.thermocouple_sensor_options : [];
+                currentRtdWireOptions = Array.isArray(data.rtd_wire_options) ? data.rtd_wire_options : [];
+                const sensorSel = document.getElementById('sensorType');
+                const wireSel = document.getElementById('wireType');
+                sensorSel.setAttribute('data-current', data.current_sensor_type ?? "");
+                wireSel.setAttribute('data-current', data.current_wire_type ?? "");
+                sensorSel.disabled = !supportsTempSensorOptions;
+                wireSel.disabled = !supportsTempSensorOptions;
+                renderHardwareDependentOptions();
+
+                const dmWrap = document.getElementById('defaultModeWrap');
+                const dmSel = document.getElementById('defaultMode');
+                dmSel.innerHTML = "";
+                const dmOptions = Array.isArray(data.default_mode_options) ? data.default_mode_options : [];
+                if (supportsDefaultMode && dmOptions.length) {
+                    dmWrap.style.display = "";
+                    dmSel.disabled = false;
+                    dmOptions.forEach(r => {
+                        const opt = document.createElement('option');
+                        opt.value = r.value;
+                        opt.text = r.label || `Value ${r.value}`;
+                        if (String(r.value) === String(data.current_default_mode)) opt.selected = true;
+                        dmSel.add(opt);
+                    });
+                } else {
+                    dmWrap.style.display = "";
+                    dmSel.disabled = true;
+                    const opt = document.createElement('option');
+                    opt.value = "";
+                    opt.text = "N/A";
+                    opt.selected = true;
+                    dmSel.add(opt);
+                }
+
+                const itWrap = document.getElementById('inactivityTimeoutWrap');
+                const itInput = document.getElementById('inactivityTimeout');
+                if (supportsInactivityTimeout) {
+                    itWrap.style.display = "";
+                    itInput.disabled = false;
+                    itInput.value = (data.current_inactivity_timeout ?? 30);
+                } else {
+                    itWrap.style.display = "";
+                    itInput.disabled = true;
+                    itInput.value = "";
+                }
+
+                const criWrap = document.getElementById('checkRadioIntervalWrap');
+                const criInput = document.getElementById('checkRadioInterval');
+                if (supportsCheckRadioInterval) {
+                    criWrap.style.display = "";
+                    criInput.disabled = false;
+                    criInput.value = (data.current_check_radio_interval ?? 5);
+                } else {
+                    criWrap.style.display = "";
+                    criInput.disabled = true;
+                    criInput.value = "";
+                }
                 const activeChannelsText = Array.isArray(data.channels)
                     ? data.channels.filter(ch => ch.enabled).map(ch => `ch${ch.id}`).join(", ")
                     : "";
@@ -621,6 +796,12 @@
         const storageLimitModeRaw = document.getElementById('storageLimitMode').value;
         const lostBeaconTimeoutRaw = document.getElementById('lostBeaconTimeout').value;
         const diagnosticIntervalRaw = document.getElementById('diagnosticInterval').value;
+        const defaultModeRaw = document.getElementById('defaultMode').value;
+        const inactivityTimeoutRaw = document.getElementById('inactivityTimeout').value;
+        const checkRadioIntervalRaw = document.getElementById('checkRadioInterval').value;
+        const transducerTypeRaw = document.getElementById('transducerType').value;
+        const sensorTypeRaw = document.getElementById('sensorType').value;
+        const wireTypeRaw = document.getElementById('wireType').value;
         const statusDiv = document.getElementById('writeStatus');
         if (!idleConfirmed) {
             statusDiv.className = "mt-3 text-center status-err";
@@ -630,6 +811,16 @@
         if (!rate || Number.isNaN(parseInt(rate))) {
             statusDiv.className = "mt-3 text-center status-err";
             statusDiv.innerHTML = "❌ Sample Rate is unknown (N/A). Run FULL READ once or configure in SensorConnect.";
+            return;
+        }
+        if (transducerTypeRaw !== "" && sensorTypeRaw === "") {
+            statusDiv.className = "mt-3 text-center status-err";
+            statusDiv.innerHTML = "❌ Sensor Type is required for selected Transducer Type.";
+            return;
+        }
+        if (transducerTypeRaw === "1" && wireTypeRaw === "") {
+            statusDiv.className = "mt-3 text-center status-err";
+            statusDiv.innerHTML = "❌ Wire Type is required for RTD.";
             return;
         }
 
@@ -653,7 +844,13 @@
                     low_pass_filter: lowPassFilterRaw === "" ? null : parseInt(lowPassFilterRaw),
                     storage_limit_mode: storageLimitModeRaw === "" ? null : parseInt(storageLimitModeRaw),
                     lost_beacon_timeout: lostBeaconTimeoutRaw === "" ? null : parseInt(lostBeaconTimeoutRaw),
-                    diagnostic_interval: diagnosticIntervalRaw === "" ? null : parseInt(diagnosticIntervalRaw)
+                    diagnostic_interval: diagnosticIntervalRaw === "" ? null : parseInt(diagnosticIntervalRaw),
+                    default_mode: defaultModeRaw === "" ? null : parseInt(defaultModeRaw),
+                    inactivity_timeout: inactivityTimeoutRaw === "" ? null : parseInt(inactivityTimeoutRaw),
+                    check_radio_interval: checkRadioIntervalRaw === "" ? null : parseInt(checkRadioIntervalRaw),
+                    transducer_type: transducerTypeRaw === "" ? null : parseInt(transducerTypeRaw),
+                    sensor_type: sensorTypeRaw === "" ? null : parseInt(sensorTypeRaw),
+                    wire_type: wireTypeRaw === "" ? null : parseInt(wireTypeRaw)
                 })
             });
             const data = await res.json();

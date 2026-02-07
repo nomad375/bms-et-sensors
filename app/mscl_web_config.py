@@ -92,6 +92,98 @@ STORAGE_LIMIT_LABELS = {
     0: "Overwrite",
     1: "Stop",
 }
+DEFAULT_MODE_LABELS = {
+    0: "Idle",
+    1: "Low Duty Cycle",
+    5: "Sleep",
+    6: "Sample (Sync)",
+}
+
+def _wt(name, default=None):
+    return getattr(mscl.WirelessTypes, name, default)
+
+TRANSDUCER_LABELS = {
+    _wt("transducer_thermocouple", 0): "Thermocouple",
+    _wt("transducer_rtd", 1): "RTD",
+    _wt("transducer_thermistor", 2): "Thermistor",
+}
+
+RTD_SENSOR_LABELS = {
+    _wt("rtd_uncompensated", 0): "Uncompensated (Resistance)",
+    _wt("rtd_pt10", 1): "PT10",
+    _wt("rtd_pt50", 2): "PT50",
+    _wt("rtd_pt100", 3): "PT100",
+    _wt("rtd_pt200", 4): "PT200",
+    _wt("rtd_pt500", 5): "PT500",
+    _wt("rtd_pt1000", 6): "PT1000",
+}
+
+THERMISTOR_SENSOR_LABELS = {
+    _wt("thermistor_uncompensated", 0): "Uncompensated",
+    _wt("thermistor_44004_44033", 1): "44004 / 44033",
+    _wt("thermistor_44005_44030", 2): "44005 / 44030",
+    _wt("thermistor_44007_44034", 3): "44007 / 44034",
+    _wt("thermistor_44006_44031", 4): "44006 / 44031",
+    _wt("thermistor_44008_44032", 5): "44008 / 44032",
+    _wt("thermistor_ysi_400", 6): "YSI 400",
+}
+
+THERMOCOUPLE_SENSOR_LABELS = {
+    0: "Type J",
+    1: "Type K",
+    2: "Type T",
+    3: "Type E",
+    4: "Type R",
+    5: "Type S",
+    6: "Type B",
+    7: "Type N",
+}
+
+RTD_WIRE_LABELS = {
+    _wt("rtd_2wire", 0): "2 Wire",
+    _wt("rtd_3wire", 1): "3 Wire",
+    _wt("rtd_4wire", 2): "4 Wire",
+}
+
+def _get_temp_sensor_options(node):
+    errs = []
+    for getter in (
+        lambda: node.getTempSensorOptions(ch1_mask()),
+        lambda: node.getTempSensorOptions(),
+    ):
+        try:
+            return getter(), None
+        except Exception as e:
+            errs.append(str(e))
+    return None, " | ".join(errs) if errs else "getTempSensorOptions failed"
+
+def _set_temp_sensor_options(cfg, opts):
+    errs = []
+    for setter in (
+        lambda: cfg.tempSensorOptions(ch1_mask(), opts),
+        lambda: cfg.tempSensorOptions(opts),
+    ):
+        try:
+            setter()
+            return True, None
+        except Exception as e:
+            errs.append(str(e))
+    return False, " | ".join(errs) if errs else "tempSensorOptions set failed"
+
+def _filter_default_modes(opts):
+    vals = {int(x.get("value")) for x in opts if x.get("value") is not None}
+    if 4 in vals:
+        opts = [x for x in opts if int(x.get("value")) != 4]
+    return opts
+
+def _feature_supported(features, method_name):
+    try:
+        fn = getattr(features, method_name, None)
+        if callable(fn):
+            return bool(fn())
+    except Exception:
+        pass
+    return False
 
 def find_port():
     ports = glob.glob('/dev/ttyACM*') + glob.glob('/dev/ttyUSB*')
@@ -267,11 +359,12 @@ def send_idle_sensorconnect_style(node, node_id, stage_tag):
                 complete = True
                 transport_alive = True
                 break
-            if poll % 3 == 0:
+            # Keep logs concise: report only at coarse milestones.
+            if poll in (10, 20, 30, 40):
                 log(f"[mscl-web] [PREP-IDLE] {stage_tag} waiting node_id={node_id} poll {poll}/40")
         except Exception as e:
             last_reason = f"status.complete failed: {e}"
-            log(f"[mscl-web] [PREP-IDLE] {stage_tag} waiting node_id={node_id} poll {poll}/40 ({last_reason})")
+            log(f"[mscl-web] [PREP-IDLE] {stage_tag} wait failed node_id={node_id} poll {poll}/40 ({last_reason})")
             break
 
     if not complete:
@@ -535,6 +628,8 @@ def api_diagnostics(node_id):
                 ("supportsInputRange", "supportsInputRange"),
                 ("supportsLowPassFilter", "supportsLowPassFilter"),
                 ("supportsCommunicationProtocol", "supportsCommunicationProtocol"),
+                ("supportsTransducerType", "supportsTransducerType"),
+                ("supportsTempSensorOptions", "supportsTempSensorOptions"),
             ]
             out = []
             for label, fn in flags:
@@ -561,7 +656,8 @@ def api_read(node_id):
         cached = NODE_READ_CACHE.get(node_id, {})
         refresh_eeprom = True
         for attempt in range(1, max_attempts + 1):
-            log(f"[mscl-web] [{read_tag}] attempt {attempt}/{max_attempts} node_id={node_id}")
+            if attempt > 1:
+                log(f"[mscl-web] [{read_tag}] retry {attempt}/{max_attempts} node_id={node_id}")
             ok, msg = internal_connect()
             if not ok or BASE_STATION is None:
                 last_err = f"Base station not connected: {msg}"
@@ -819,6 +915,158 @@ def api_read(node_id):
                 if current_diagnostic_interval is None:
                     current_diagnostic_interval = 60
 
+                supports_transducer_type = cached.get("supports_transducer_type")
+                supports_temp_sensor_options = cached.get("supports_temp_sensor_options")
+                current_transducer_type = cached.get("current_transducer_type")
+                current_sensor_type = cached.get("current_sensor_type")
+                current_wire_type = cached.get("current_wire_type")
+                transducer_options = cached.get("transducer_options", [])
+                rtd_sensor_options = cached.get("rtd_sensor_options", [])
+                thermistor_sensor_options = cached.get("thermistor_sensor_options", [])
+                thermocouple_sensor_options = cached.get("thermocouple_sensor_options", [])
+                rtd_wire_options = cached.get("rtd_wire_options", [])
+
+                supports_default_mode = cached.get("supports_default_mode")
+                supports_inactivity_timeout = cached.get("supports_inactivity_timeout")
+                supports_check_radio_interval = cached.get("supports_check_radio_interval")
+                current_default_mode = cached.get("current_default_mode")
+                current_inactivity_timeout = cached.get("current_inactivity_timeout")
+                current_check_radio_interval = cached.get("current_check_radio_interval")
+                default_mode_options = cached.get("default_mode_options", [])
+
+                try:
+                    features = node.features()
+                except Exception:
+                    features = None
+
+                if features is not None:
+                    supports_default_mode = _feature_supported(features, "supportsDefaultMode")
+                    supports_inactivity_timeout = _feature_supported(features, "supportsInactivityTimeout")
+                    supports_check_radio_interval = _feature_supported(features, "supportsCheckRadioInterval")
+                    supports_transducer_type = _feature_supported(features, "supportsTransducerType")
+                    supports_temp_sensor_options = _feature_supported(features, "supportsTempSensorOptions")
+
+                    # SensorConnect-style behavior: try reads even when supports* says NO.
+                    try:
+                        current_default_mode = int(node.getDefaultMode())
+                        supports_default_mode = True
+                    except Exception as e:
+                        log(f"[mscl-web] [{read_tag}] warn node_id={node_id}: getDefaultMode failed: {e}")
+                    try:
+                        modes = []
+                        try:
+                            modes = features.defaultModes()
+                        except Exception:
+                            modes = []
+                        default_mode_options = []
+                        for m in modes:
+                            mi = int(m)
+                            default_mode_options.append({
+                                "value": mi,
+                                "label": DEFAULT_MODE_LABELS.get(mi, f"Value {mi}")
+                            })
+                        default_mode_options = _filter_default_modes(default_mode_options)
+                        if default_mode_options:
+                            supports_default_mode = True
+                        if not default_mode_options:
+                            default_mode_options = [
+                                {"value": 0, "label": "Idle"},
+                                {"value": 5, "label": "Sleep"},
+                                {"value": 6, "label": "Sample (Sync)"},
+                            ]
+                            default_mode_options = _filter_default_modes(default_mode_options)
+                    except Exception as e:
+                        log(f"[mscl-web] [{read_tag}] warn node_id={node_id}: features/defaultModes failed: {e}")
+                        if not default_mode_options:
+                            default_mode_options = [
+                                {"value": 0, "label": "Idle"},
+                                {"value": 5, "label": "Sleep"},
+                                {"value": 6, "label": "Sample (Sync)"},
+                            ]
+                        default_mode_options = _filter_default_modes(default_mode_options)
+
+                    try:
+                        current_inactivity_timeout = int(node.getInactivityTimeout())
+                        supports_inactivity_timeout = True
+                    except Exception as e:
+                        log(f"[mscl-web] [{read_tag}] warn node_id={node_id}: getInactivityTimeout failed: {e}")
+
+                    try:
+                        current_check_radio_interval = int(node.getCheckRadioInterval())
+                        supports_check_radio_interval = True
+                    except Exception as e:
+                        log(f"[mscl-web] [{read_tag}] warn node_id={node_id}: getCheckRadioInterval failed: {e}")
+
+                    try:
+                        tr_types = []
+                        try:
+                            tr_types = features.transducerTypes()
+                        except Exception:
+                            tr_types = []
+                        transducer_options = []
+                        for v in tr_types:
+                            vi = int(v)
+                            transducer_options.append({"value": vi, "label": TRANSDUCER_LABELS.get(vi, f"Value {vi}")})
+                        if not transducer_options:
+                            transducer_options = [{"value": int(k), "label": v} for k, v in TRANSDUCER_LABELS.items()]
+                    except Exception as e:
+                        log(f"[mscl-web] [{read_tag}] warn node_id={node_id}: features/transducerTypes failed: {e}")
+                        if not transducer_options:
+                            transducer_options = [{"value": int(k), "label": v} for k, v in TRANSDUCER_LABELS.items()]
+                    try:
+                        tc_types = []
+                        try:
+                            tc_types = features.thermocoupleTypes()
+                        except Exception:
+                            tc_types = []
+                        thermocouple_sensor_options = []
+                        for v in tc_types:
+                            vi = int(v)
+                            thermocouple_sensor_options.append({"value": vi, "label": THERMOCOUPLE_SENSOR_LABELS.get(vi, f"Value {vi}")})
+                    except Exception as e:
+                        log(f"[mscl-web] [{read_tag}] warn node_id={node_id}: features/thermocoupleTypes failed: {e}")
+
+                # SensorConnect-style behavior: read current temp sensor options even if supports* says NO.
+                tso, tso_err = _get_temp_sensor_options(node)
+                if tso is not None:
+                    try:
+                        current_transducer_type = int(tso.transducerType())
+                        supports_transducer_type = True
+                    except Exception:
+                        pass
+                    try:
+                        if current_transducer_type == _wt("transducer_rtd", 1):
+                            current_sensor_type = int(tso.rtdType())
+                        elif current_transducer_type == _wt("transducer_thermistor", 2):
+                            current_sensor_type = int(tso.thermistorType())
+                        elif current_transducer_type == _wt("transducer_thermocouple", 0):
+                            current_sensor_type = int(tso.thermocoupleType())
+                    except Exception:
+                        pass
+                    try:
+                        current_wire_type = int(tso.rtdWireType())
+                    except Exception:
+                        pass
+                    supports_temp_sensor_options = True
+                elif tso_err:
+                    log(f"[mscl-web] [{read_tag}] warn node_id={node_id}: getTempSensorOptions failed: {tso_err}")
+
+                if not transducer_options:
+                    transducer_options = [{"value": int(k), "label": v} for k, v in TRANSDUCER_LABELS.items()]
+                if current_transducer_type is not None and all(x.get("value") != int(current_transducer_type) for x in transducer_options):
+                    transducer_options.insert(0, {"value": int(current_transducer_type), "label": TRANSDUCER_LABELS.get(int(current_transducer_type), f"Value {int(current_transducer_type)}")})
+                if current_transducer_type is None and transducer_options:
+                    current_transducer_type = int(transducer_options[0]["value"])
+
+                rtd_sensor_options = [{"value": int(k), "label": v} for k, v in RTD_SENSOR_LABELS.items()]
+                thermistor_sensor_options = [{"value": int(k), "label": v} for k, v in THERMISTOR_SENSOR_LABELS.items()]
+                if not thermocouple_sensor_options:
+                    thermocouple_sensor_options = [{"value": int(k), "label": v} for k, v in THERMOCOUPLE_SENSOR_LABELS.items()]
+                if current_transducer_type == _wt("transducer_thermocouple", 0) and current_sensor_type is not None:
+                    if all(x.get("value") != int(current_sensor_type) for x in thermocouple_sensor_options):
+                        thermocouple_sensor_options.insert(0, {"value": int(current_sensor_type), "label": THERMOCOUPLE_SENSOR_LABELS.get(int(current_sensor_type), f"Value {int(current_sensor_type)}")})
+                rtd_wire_options = [{"value": int(k), "label": v} for k, v in RTD_WIRE_LABELS.items()]
+
                 # Частоты (если доступно)
                 supported_rates = cached.get("supported_rates", [])
                 if (refresh_eeprom or not supported_rates) and current_rate is not None:
@@ -855,6 +1103,23 @@ def api_read(node_id):
                     current_storage_limit_mode=current_storage_limit_mode, storage_limit_options=storage_limit_options,
                     current_lost_beacon_timeout=current_lost_beacon_timeout,
                     current_diagnostic_interval=current_diagnostic_interval,
+                    supports_default_mode=bool(supports_default_mode),
+                    supports_inactivity_timeout=bool(supports_inactivity_timeout),
+                    supports_check_radio_interval=bool(supports_check_radio_interval),
+                    supports_transducer_type=bool(supports_transducer_type),
+                    supports_temp_sensor_options=bool(supports_temp_sensor_options),
+                    current_default_mode=current_default_mode,
+                    current_inactivity_timeout=current_inactivity_timeout,
+                    current_check_radio_interval=current_check_radio_interval,
+                    default_mode_options=default_mode_options,
+                    current_transducer_type=current_transducer_type,
+                    current_sensor_type=current_sensor_type,
+                    current_wire_type=current_wire_type,
+                    transducer_options=transducer_options,
+                    rtd_sensor_options=rtd_sensor_options,
+                    thermistor_sensor_options=thermistor_sensor_options,
+                    thermocouple_sensor_options=thermocouple_sensor_options,
+                    rtd_wire_options=rtd_wire_options,
                 )
                 NODE_READ_CACHE[node_id] = dict(payload, ts=time.time())
                 log(f"[mscl-web] [{read_tag}] success node_id={node_id} sample_rate={payload.get('current_rate')} fw={payload.get('fw')}")
@@ -1046,7 +1311,8 @@ def api_write():
     log(f"[mscl-web] Write request node_id={data.get('node_id')}")
     with OP_LOCK:
         for attempt in range(1, 6):
-            log(f"[mscl-web] Write attempt {attempt}/5 node_id={data.get('node_id')}")
+            if attempt > 1:
+                log(f"[mscl-web] Write retry {attempt}/5 node_id={data.get('node_id')}")
             # If last attempt failed with EEPROM read error, pause before retry.
             if last_was_eeprom:
                 backoff = min(4.0, 0.5 * (2 ** (attempt - 1)))
@@ -1082,6 +1348,12 @@ def api_write():
                 storage_limit_mode = _to_opt_int(data.get('storage_limit_mode'))
                 lost_beacon_timeout = _to_opt_int(data.get('lost_beacon_timeout'))
                 diagnostic_interval = _to_opt_int(data.get('diagnostic_interval'))
+                default_mode = _to_opt_int(data.get('default_mode'))
+                inactivity_timeout = _to_opt_int(data.get('inactivity_timeout'))
+                check_radio_interval = _to_opt_int(data.get('check_radio_interval'))
+                transducer_type = _to_opt_int(data.get('transducer_type'))
+                sensor_type = _to_opt_int(data.get('sensor_type'))
+                wire_type = _to_opt_int(data.get('wire_type'))
                 if sample_rate is None or tx_power is None:
                     cached = NODE_READ_CACHE.get(int(data['node_id']), {})
                     if sample_rate is None:
@@ -1098,6 +1370,18 @@ def api_write():
                         lost_beacon_timeout = cached.get('current_lost_beacon_timeout')
                     if diagnostic_interval is None:
                         diagnostic_interval = cached.get('current_diagnostic_interval')
+                    if default_mode is None:
+                        default_mode = cached.get('current_default_mode')
+                    if inactivity_timeout is None:
+                        inactivity_timeout = cached.get('current_inactivity_timeout')
+                    if check_radio_interval is None:
+                        check_radio_interval = cached.get('current_check_radio_interval')
+                    if transducer_type is None:
+                        transducer_type = cached.get('current_transducer_type')
+                    if sensor_type is None:
+                        sensor_type = cached.get('current_sensor_type')
+                    if wire_type is None:
+                        wire_type = cached.get('current_wire_type')
                 if sample_rate is None:
                     return jsonify(success=False, error="Sample Rate is unknown. Run FULL READ once or set node in SensorConnect.")
                 if tx_power is None:
@@ -1110,54 +1394,186 @@ def api_write():
                 channels = [int(ch) for ch in channels if _to_opt_int(ch) in (1, 2)]
                 if len(channels) == 0:
                     channels = [1]
-                config = mscl.WirelessNodeConfig()
-                config.samplingMode(mscl.WirelessTypes.samplingMode_sync)
-                config.sampleRate(int(sample_rate))
                 p_map = {16: 1, 10: 2, 5: 3, 0: 4}
                 tx_enum = p_map.get(int(tx_power), 1)
-                config.transmitPower(tx_enum)
                 full_mask = mscl.ChannelMask()
                 for ch_id in channels:
                     full_mask.enable(ch_id)
-                config.activeChannels(full_mask)
-                if input_range is not None:
-                    ir_set = False
-                    ir_errs = []
-                    for setter in (
-                        lambda: config.inputRange(ch1_mask(), int(input_range)),
-                        lambda: config.inputRange(int(input_range)),
-                    ):
+
+                features = None
+                try:
+                    features = node.features()
+                except Exception:
+                    features = None
+                supports_default_mode = _feature_supported(features, "supportsDefaultMode") if features is not None else False
+                supports_inactivity_timeout = _feature_supported(features, "supportsInactivityTimeout") if features is not None else False
+                supports_check_radio_interval = _feature_supported(features, "supportsCheckRadioInterval") if features is not None else False
+                supports_transducer_type = _feature_supported(features, "supportsTransducerType") if features is not None else False
+                supports_temp_sensor_options = _feature_supported(features, "supportsTempSensorOptions") if features is not None else False
+
+                write_hw_effective = {"transducer_type": None, "sensor_type": None, "wire_type": None}
+
+                def build_config(include_default_mode=True):
+                    cfg = mscl.WirelessNodeConfig()
+                    cfg.samplingMode(mscl.WirelessTypes.samplingMode_sync)
+                    cfg.sampleRate(int(sample_rate))
+                    cfg.transmitPower(tx_enum)
+                    cfg.activeChannels(full_mask)
+                    hw_effective = {"transducer_type": None, "sensor_type": None, "wire_type": None}
+
+                    if input_range is not None:
+                        ir_set = False
+                        ir_errs = []
+                        for setter in (
+                            lambda: cfg.inputRange(ch1_mask(), int(input_range)),
+                            lambda: cfg.inputRange(int(input_range)),
+                        ):
+                            try:
+                                setter()
+                                ir_set = True
+                                break
+                            except Exception as e:
+                                ir_errs.append(str(e))
+                        if not ir_set:
+                            raise RuntimeError("Input Range not set: " + " | ".join(ir_errs))
+
+                    if low_pass_filter is not None:
+                        lp_set = False
+                        lp_errs = []
+                        for setter in (
+                            lambda: cfg.lowPassFilter(ch1_mask(), int(low_pass_filter)),
+                            lambda: cfg.lowPassFilter(full_mask, int(low_pass_filter)),
+                            lambda: cfg.lowPassFilter(int(low_pass_filter)),
+                        ):
+                            try:
+                                setter()
+                                lp_set = True
+                                break
+                            except Exception as e:
+                                lp_errs.append(str(e))
+                        if not lp_set:
+                            raise RuntimeError("Low Pass Filter not set: " + " | ".join(lp_errs))
+
+                    if storage_limit_mode is not None:
+                        cfg.storageLimitMode(int(storage_limit_mode))
+                    if lost_beacon_timeout is not None:
+                        cfg.lostBeaconTimeout(int(lost_beacon_timeout))
+                    if diagnostic_interval is not None:
+                        cfg.diagnosticInterval(int(diagnostic_interval))
+
+                    # SensorConnect-style behavior: try setters even when supports* reports NO.
+                    nonlocal supports_default_mode, supports_inactivity_timeout, supports_check_radio_interval
+                    nonlocal supports_transducer_type, supports_temp_sensor_options
+                    if include_default_mode and default_mode is not None:
                         try:
-                            setter()
-                            ir_set = True
-                            break
+                            cfg.defaultMode(int(default_mode))
+                            supports_default_mode = True
                         except Exception as e:
-                            ir_errs.append(str(e))
-                    if not ir_set:
-                        raise RuntimeError("Input Range not set: " + " | ".join(ir_errs))
-                if low_pass_filter is not None:
-                    lp_set = False
-                    lp_errs = []
-                    for setter in (
-                        lambda: config.lowPassFilter(ch1_mask(), int(low_pass_filter)),
-                        lambda: config.lowPassFilter(full_mask, int(low_pass_filter)),
-                        lambda: config.lowPassFilter(int(low_pass_filter)),
-                    ):
+                            log(f"[mscl-web] Write warn node_id={data.get('node_id')}: defaultMode not set: {e}")
+                    if inactivity_timeout is not None:
                         try:
-                            setter()
-                            lp_set = True
-                            break
+                            cfg.inactivityTimeout(int(inactivity_timeout))
+                            supports_inactivity_timeout = True
                         except Exception as e:
-                            lp_errs.append(str(e))
-                    if not lp_set:
-                        raise RuntimeError("Low Pass Filter not set: " + " | ".join(lp_errs))
-                if storage_limit_mode is not None:
-                    config.storageLimitMode(int(storage_limit_mode))
-                if lost_beacon_timeout is not None:
-                    config.lostBeaconTimeout(int(lost_beacon_timeout))
-                if diagnostic_interval is not None:
-                    config.diagnosticInterval(int(diagnostic_interval))
-                node.applyConfig(config)
+                            log(f"[mscl-web] Write warn node_id={data.get('node_id')}: inactivityTimeout not set: {e}")
+                    if check_radio_interval is not None:
+                        try:
+                            cfg.checkRadioInterval(int(check_radio_interval))
+                            supports_check_radio_interval = True
+                        except Exception as e:
+                            log(f"[mscl-web] Write warn node_id={data.get('node_id')}: checkRadioInterval not set: {e}")
+
+                    # Hardware -> temp sensor options (SensorConnect-style best effort)
+                    if transducer_type is not None or sensor_type is not None or wire_type is not None:
+                        try:
+                            tso, tso_err = _get_temp_sensor_options(node)
+                            if tso is None:
+                                raise RuntimeError(tso_err or "getTempSensorOptions failed")
+
+                            try:
+                                cur_transducer = int(tso.transducerType())
+                            except Exception:
+                                cur_transducer = None
+                            try:
+                                cur_rtd_type = int(tso.rtdType())
+                            except Exception:
+                                cur_rtd_type = None
+                            try:
+                                cur_thermistor_type = int(tso.thermistorType())
+                            except Exception:
+                                cur_thermistor_type = None
+                            try:
+                                cur_thermocouple_type = int(tso.thermocoupleType())
+                            except Exception:
+                                cur_thermocouple_type = None
+                            try:
+                                cur_rtd_wire = int(tso.rtdWireType())
+                            except Exception:
+                                cur_rtd_wire = None
+
+                            eff_transducer = int(transducer_type) if transducer_type is not None else cur_transducer
+                            new_tso = None
+                            if eff_transducer == _wt("transducer_rtd", 1):
+                                eff_sensor = int(sensor_type) if sensor_type is not None else cur_rtd_type
+                                eff_wire = int(wire_type) if wire_type is not None else cur_rtd_wire
+                                if eff_sensor is None:
+                                    eff_sensor = _wt("rtd_uncompensated", 0)
+                                if eff_wire is None:
+                                    eff_wire = _wt("rtd_2wire", 0)
+                                new_tso = mscl.TempSensorOptions.RTD(int(eff_wire), int(eff_sensor))
+                                hw_effective["transducer_type"] = int(eff_transducer)
+                                hw_effective["sensor_type"] = int(eff_sensor)
+                                hw_effective["wire_type"] = int(eff_wire)
+                            elif eff_transducer == _wt("transducer_thermistor", 2):
+                                eff_sensor = int(sensor_type) if sensor_type is not None else cur_thermistor_type
+                                if eff_sensor is None:
+                                    eff_sensor = _wt("thermistor_uncompensated", 0)
+                                new_tso = mscl.TempSensorOptions.Thermistor(int(eff_sensor))
+                                hw_effective["transducer_type"] = int(eff_transducer)
+                                hw_effective["sensor_type"] = int(eff_sensor)
+                                hw_effective["wire_type"] = None
+                            elif eff_transducer == _wt("transducer_thermocouple", 0):
+                                eff_sensor = int(sensor_type) if sensor_type is not None else cur_thermocouple_type
+                                if eff_sensor is None:
+                                    eff_sensor = 0
+                                new_tso = mscl.TempSensorOptions.Thermocouple(int(eff_sensor))
+                                hw_effective["transducer_type"] = int(eff_transducer)
+                                hw_effective["sensor_type"] = int(eff_sensor)
+                                hw_effective["wire_type"] = None
+                            else:
+                                raise RuntimeError(f"Unsupported transducer type: {eff_transducer}")
+
+                            ok_tso, err_tso = _set_temp_sensor_options(cfg, new_tso)
+                            if not ok_tso:
+                                log(f"[mscl-web] Write warn node_id={data.get('node_id')}: tempSensorOptions not set: {err_tso}")
+                            else:
+                                supports_transducer_type = True
+                                supports_temp_sensor_options = True
+                                write_hw_effective["transducer_type"] = hw_effective["transducer_type"]
+                                write_hw_effective["sensor_type"] = hw_effective["sensor_type"]
+                                write_hw_effective["wire_type"] = hw_effective["wire_type"]
+                                log(
+                                    f"[mscl-web] Write hardware node_id={data.get('node_id')}: "
+                                    f"requested(transducer={transducer_type}, sensor={sensor_type}, wire={wire_type}) "
+                                    f"effective(transducer={hw_effective['transducer_type']}, "
+                                    f"sensor={hw_effective['sensor_type']}, wire={hw_effective['wire_type']})"
+                                )
+                        except Exception as e:
+                            log(f"[mscl-web] Write warn node_id={data.get('node_id')}: tempSensorOptions flow failed: {e}")
+                    return cfg
+
+                config = build_config(include_default_mode=True)
+                try:
+                    node.applyConfig(config)
+                except Exception as e:
+                    emsg = str(e)
+                    if default_mode is not None and "Default Mode is not supported" in emsg:
+                        log(f"[mscl-web] Write warn node_id={data.get('node_id')}: retry without Default Mode")
+                        supports_default_mode = False
+                        config2 = build_config(include_default_mode=False)
+                        node.applyConfig(config2)
+                    else:
+                        raise
                 # Keep UI stable after write even if subsequent EEPROM reads fail.
                 cached = NODE_READ_CACHE.get(int(data['node_id']), {})
                 cached['current_rate'] = int(sample_rate)
@@ -1173,6 +1589,26 @@ def api_write():
                     cached['current_lost_beacon_timeout'] = int(lost_beacon_timeout)
                 if diagnostic_interval is not None:
                     cached['current_diagnostic_interval'] = int(diagnostic_interval)
+                if supports_default_mode and default_mode is not None:
+                    cached['current_default_mode'] = int(default_mode)
+                if supports_inactivity_timeout and inactivity_timeout is not None:
+                    cached['current_inactivity_timeout'] = int(inactivity_timeout)
+                if supports_check_radio_interval and check_radio_interval is not None:
+                    cached['current_check_radio_interval'] = int(check_radio_interval)
+                if supports_transducer_type:
+                    if write_hw_effective["transducer_type"] is not None:
+                        cached['current_transducer_type'] = int(write_hw_effective["transducer_type"])
+                    elif transducer_type is not None:
+                        cached['current_transducer_type'] = int(transducer_type)
+                if supports_temp_sensor_options:
+                    if write_hw_effective["sensor_type"] is not None:
+                        cached['current_sensor_type'] = int(write_hw_effective["sensor_type"])
+                    elif sensor_type is not None:
+                        cached['current_sensor_type'] = int(sensor_type)
+                    if write_hw_effective["wire_type"] is not None:
+                        cached['current_wire_type'] = int(write_hw_effective["wire_type"])
+                    elif wire_type is not None:
+                        cached['current_wire_type'] = int(wire_type)
                 enabled_ids = {int(ch_id) for ch_id in channels}
                 cached['channels'] = [{"id": i, "enabled": (i in enabled_ids)} for i in (1, 2)]
                 cached['ts'] = time.time()
