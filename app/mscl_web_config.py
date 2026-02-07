@@ -54,6 +54,19 @@ RATE_MAP = {
     118: "4 kHz", 119: "8 kHz", 120: "16 kHz", 121: "32 kHz",
     122: "64 kHz", 123: "128 kHz"
 }
+INPUT_RANGE_LABELS = {
+    99: "+/-1.35 V or 0 to 1 mega-ohms (Gain: 1)",
+    100: "+/-1.25 V or 0 to 10000 ohms (Gain: 2)",
+    101: "+/-625 mV or 0 to 3333.3 ohms (Gain: 4)",
+    102: "+/-312.5 mV or 0 to 1428.6 ohms (Gain: 8)",
+    103: "+/-156.25 mV or 0 to 666.67 ohms (Gain: 16)",
+    0: "+/-14.545 mV",
+    1: "+/-10.236 mV",
+    2: "+/-7.608 mV",
+    3: "+/-4.046 mV",
+    4: "+/-2.008 mV",
+}
+PRIMARY_INPUT_RANGES = {99, 100, 101, 102, 103}
 
 HTML_TEMPLATE = None
 
@@ -120,6 +133,27 @@ def ensure_beacon_on():
         log("[mscl-web] [BEACON] auto-enabled for node communication")
     except Exception as e:
         log(f"[mscl-web] [BEACON] auto-enable failed: {e}")
+
+def ch1_mask():
+    mask = mscl.ChannelMask()
+    mask.enable(1)
+    return mask
+
+def set_idle_with_retry(node, node_id, stage_tag, attempts=2, delay_sec=0.8, required=False):
+    last_err = None
+    for i in range(1, attempts + 1):
+        try:
+            node.setToIdle()
+            log(f"[mscl-web] [PREP-IDLE] {stage_tag} success node_id={node_id} attempt {i}/{attempts}")
+            return True
+        except Exception as e:
+            last_err = str(e)
+            log(f"[mscl-web] [PREP-IDLE] {stage_tag} fail node_id={node_id} attempt {i}/{attempts}: {e}")
+            if i < attempts:
+                time.sleep(delay_sec)
+    if required:
+        raise RuntimeError(f"Set to Idle failed at {stage_tag}: {last_err}")
+    return False
 
 @app.route('/')
 def index(): return render_template_string(TEMPLATE_PATH.read_text())
@@ -188,6 +222,7 @@ def api_status():
             port=port,
             message=msg,
             beacon_state=BASE_BEACON_STATE,
+            base_connection=f"Serial, {port}, {BAUDRATE}" if port and port != "N/A" else None,
             ts=LAST_BASE_STATUS.get("ts"),
             base_model=base_model,
             base_fw=base_fw,
@@ -279,18 +314,15 @@ def api_logs():
 @app.route('/api/read/<int:node_id>')
 def api_read(node_id):
     global BASE_STATION, RATE_MAP, NODE_READ_CACHE
-    read_mode = (request.args.get("mode") or "fast").strip().lower()
-    if read_mode not in ("fast", "full"):
-        read_mode = "fast"
-    read_tag = "READ-FULL" if read_mode == "full" else "READ-FAST"
-    max_attempts = 5 if read_mode == "full" else 2
+    read_tag = "READ"
+    max_attempts = 5
     last_err = None
     log(f"[mscl-web] [{read_tag}] request node_id={node_id}")
     with OP_LOCK:
         cached = NODE_READ_CACHE.get(node_id, {})
         now_ts = time.time()
         cache_age = now_ts - float(cached.get("ts", 0))
-        refresh_eeprom = False if read_mode == "fast" else True
+        refresh_eeprom = True
         for attempt in range(1, max_attempts + 1):
             log(f"[mscl-web] [{read_tag}] attempt {attempt}/{max_attempts} node_id={node_id}")
             ok, msg = internal_connect()
@@ -303,13 +335,11 @@ def api_read(node_id):
                 ensure_beacon_on()
                 node = mscl.WirelessNode(node_id, BASE_STATION)
                 node.readWriteRetries(15)
-        
-                # Read path should be as non-intrusive as possible.
-                # Do not force Idle before every read; this reduced stability on real hardware.
+                set_idle_with_retry(node, node_id, "before-read", attempts=2, delay_sec=0.8, required=False)
 
                 # 2. Critical values (use cache-first for EEPROM-heavy fields)
                 current_rate = cached.get("current_rate")
-                if read_mode == "full" and (refresh_eeprom or current_rate is None):
+                if refresh_eeprom or current_rate is None:
                     try:
                         current_rate = int(node.getSampleRate())
                     except Exception as e:
@@ -333,7 +363,7 @@ def api_read(node_id):
         
                 # 3. Остальные поля — best-effort (не ломаем чтение при EEPROM ошибках)
                 model = cached.get("model", "TC-Link-200")
-                if read_mode == "full" and (refresh_eeprom or "model" not in cached):
+                if refresh_eeprom or "model" not in cached:
                     try:
                         model = node.model()
                     except Exception as e:
@@ -346,18 +376,18 @@ def api_read(node_id):
                     log(f"[mscl-web] [{read_tag}] warn node_id={node_id}: serial read failed: {e}")
         
                 fw = cached.get("fw", "N/A")
-                if read_mode == "full" and (refresh_eeprom or "fw" not in cached):
+                if refresh_eeprom or "fw" not in cached:
                     try:
                         fw = str(node.firmwareVersion())
                     except Exception as e:
                         log(f"[mscl-web] [{read_tag}] warn node_id={node_id}: firmware read failed: {e}")
         
-                current_power = cached.get("current_power", 20)
-                if read_mode == "full" and (refresh_eeprom or "current_power" not in cached):
+                current_power = cached.get("current_power", 16)
+                if refresh_eeprom or "current_power" not in cached:
                     try: 
                         p_raw = int(node.getTransmitPower())
                         p_map = {0: 20, 1: 16, 2: 10, 3: 5, 4: 0}
-                        current_power = p_map.get(p_raw, 20)
+                        current_power = p_map.get(p_raw, 16)
                     except Exception as e:
                         log(f"[mscl-web] [{read_tag}] warn node_id={node_id}: transmit power read failed: {e}")
             
@@ -410,7 +440,7 @@ def api_read(node_id):
                     storage_pct = None
                 sampling_mode = cached.get("sampling_mode")
                 sampling_mode_raw = cached.get("sampling_mode_raw")
-                if read_mode == "full" and (refresh_eeprom or "sampling_mode" not in cached):
+                if refresh_eeprom or "sampling_mode" not in cached:
                     try:
                         sampling_mode_val = node.getSamplingMode()
                         try:
@@ -421,15 +451,77 @@ def api_read(node_id):
                     except Exception:
                         pass
                 data_mode = cached.get("data_mode")
-                if read_mode == "full" and (refresh_eeprom or "data_mode" not in cached):
+                if refresh_eeprom or "data_mode" not in cached:
                     try:
                         data_mode = str(node.getDataMode())
                     except Exception:
                         pass
+                current_input_range = cached.get("current_input_range")
+                supported_input_ranges = cached.get("supported_input_ranges", [])
+                if refresh_eeprom or "current_input_range" not in cached:
+                    try:
+                        current_input_range = int(node.getInputRange(ch1_mask()))
+                    except Exception as e:
+                        log(f"[mscl-web] [{read_tag}] warn node_id={node_id}: getInputRange(ch1) failed: {e}")
+                if refresh_eeprom or not supported_input_ranges:
+                    try:
+                        features = node.features()
+                        ir_values = []
+                        try:
+                            ir_values = features.inputRanges()
+                        except Exception:
+                            ir_values = []
+                        supported_input_ranges = []
+                        for ir in ir_values:
+                            ir_int = int(ir)
+                            supported_input_ranges.append({
+                                "value": ir_int,
+                                "label": INPUT_RANGE_LABELS.get(ir_int, f"Value {ir_int}"),
+                                "primary": ir_int in PRIMARY_INPUT_RANGES,
+                            })
+                        # Stable order: primary (SensorConnect top set) first, then others by value.
+                        supported_input_ranges.sort(
+                            key=lambda x: (0 if x.get("primary") else 1, int(x.get("value", 999999)))
+                        )
+                        if len(supported_input_ranges) <= 1:
+                            existing = {int(x.get("value")) for x in supported_input_ranges if x.get("value") is not None}
+                            for v in (99, 100, 101, 102, 103):
+                                if v not in existing:
+                                    supported_input_ranges.append({
+                                        "value": v,
+                                        "label": INPUT_RANGE_LABELS[v],
+                                        "primary": True,
+                                    })
+                            supported_input_ranges.sort(
+                                key=lambda x: (0 if x.get("primary") else 1, int(x.get("value", 999999)))
+                            )
+                        if current_input_range is not None and all(x.get("value") != int(current_input_range) for x in supported_input_ranges):
+                            supported_input_ranges.insert(0, {
+                                "value": int(current_input_range),
+                                "label": INPUT_RANGE_LABELS.get(int(current_input_range), f"Value {int(current_input_range)}"),
+                                "primary": int(current_input_range) in PRIMARY_INPUT_RANGES,
+                            })
+                    except Exception as e:
+                        log(f"[mscl-web] [{read_tag}] warn node_id={node_id}: features/inputRanges failed: {e}")
+                # Fallback: keep SensorConnect-like core list visible even when feature read fails.
+                if not supported_input_ranges:
+                    supported_input_ranges = [
+                        {"value": 99, "label": INPUT_RANGE_LABELS[99], "primary": True},
+                        {"value": 100, "label": INPUT_RANGE_LABELS[100], "primary": True},
+                        {"value": 101, "label": INPUT_RANGE_LABELS[101], "primary": True},
+                        {"value": 102, "label": INPUT_RANGE_LABELS[102], "primary": True},
+                        {"value": 103, "label": INPUT_RANGE_LABELS[103], "primary": True},
+                    ]
+                    if current_input_range is not None and all(x.get("value") != int(current_input_range) for x in supported_input_ranges):
+                        supported_input_ranges.insert(0, {
+                            "value": int(current_input_range),
+                            "label": INPUT_RANGE_LABELS.get(int(current_input_range), f"Value {int(current_input_range)}"),
+                            "primary": int(current_input_range) in PRIMARY_INPUT_RANGES,
+                        })
 
                 # Частоты (если доступно)
                 supported_rates = cached.get("supported_rates", [])
-                if read_mode == "full" and (refresh_eeprom or not supported_rates) and current_rate is not None:
+                if (refresh_eeprom or not supported_rates) and current_rate is not None:
                     supported_rates = [{"enum_val": current_rate, "str_val": RATE_MAP.get(current_rate, str(current_rate) + " Hz")}]
                     try:
                         features = node.features()
@@ -455,9 +547,11 @@ def api_read(node_id):
                     region=region, last_comm=last_comm, state=state, state_text=state_text,
                     node_address=node_address, frequency=frequency,
                     storage_pct=storage_pct, sampling_mode=sampling_mode, sampling_mode_raw=sampling_mode_raw, data_mode=data_mode,
+                    current_input_range=current_input_range, supported_input_ranges=supported_input_ranges,
                     current_rate=current_rate, current_power=current_power,
                     supported_rates=supported_rates, channels=channels
                 )
+                set_idle_with_retry(node, node_id, "after-read", attempts=2, delay_sec=0.8, required=False)
                 NODE_READ_CACHE[node_id] = dict(payload, ts=time.time())
                 log(f"[mscl-web] [{read_tag}] success node_id={node_id} sample_rate={payload.get('current_rate')} fw={payload.get('fw')}")
                 return jsonify(**payload)
@@ -550,6 +644,30 @@ def api_node_cycle_power(node_id):
             log(f"[mscl-web] [PREP-CYCLE] failed node_id={node_id}: {e}")
             return jsonify(success=False, error=str(e))
 
+@app.route('/api/clear_storage/<int:node_id>', methods=['POST'])
+def api_clear_storage(node_id):
+    global BASE_STATION, NODE_READ_CACHE
+    with OP_LOCK:
+        ok, msg = internal_connect()
+        if not ok or BASE_STATION is None:
+            return jsonify(success=False, error=f"Base station not connected: {msg}")
+        try:
+            ensure_beacon_on()
+            node = mscl.WirelessNode(node_id, BASE_STATION)
+            node.readWriteRetries(15)
+            set_idle_with_retry(node, node_id, "before-clear-storage", attempts=2, delay_sec=0.8, required=False)
+            node.erase()
+            set_idle_with_retry(node, node_id, "after-clear-storage", attempts=2, delay_sec=0.8, required=False)
+            cached = NODE_READ_CACHE.get(node_id, {})
+            cached["storage_pct"] = 0.0
+            cached["ts"] = time.time()
+            NODE_READ_CACHE[node_id] = cached
+            log(f"[mscl-web] [CLEAR-STORAGE] success node_id={node_id}")
+            return jsonify(success=True, message="Storage cleared")
+        except Exception as e:
+            log(f"[mscl-web] [CLEAR-STORAGE] failed node_id={node_id}: {e}")
+            return jsonify(success=False, error=str(e))
+
 @app.route('/api/write', methods=['POST'])
 def api_write():
     global BASE_STATION, NODE_READ_CACHE
@@ -574,6 +692,7 @@ def api_write():
                 ensure_beacon_on()
                 node = mscl.WirelessNode(int(data['node_id']), BASE_STATION)
                 node.readWriteRetries(15)
+                set_idle_with_retry(node, int(data['node_id']), "before-write", attempts=2, delay_sec=0.8, required=True)
                 # Soft gate: only write when node is explicitly in Idle.
                 try:
                     state_raw = node.lastDeviceState()
@@ -589,16 +708,19 @@ def api_write():
                 sample_rate = data.get('sample_rate')
                 tx_power = data.get('tx_power')
                 channels = data.get('channels')
+                input_range = data.get('input_range')
                 if sample_rate is None or tx_power is None:
                     cached = NODE_READ_CACHE.get(int(data['node_id']), {})
                     if sample_rate is None:
                         sample_rate = cached.get('current_rate')
                     if tx_power is None:
                         tx_power = cached.get('current_power')
+                    if input_range is None:
+                        input_range = cached.get('current_input_range')
                 if sample_rate is None:
                     return jsonify(success=False, error="Sample Rate is unknown. Run FULL READ once or set node in SensorConnect.")
                 if tx_power is None:
-                    tx_power = 20
+                    tx_power = 16
                 if not isinstance(channels, list):
                     channels = [1]
                 if len(channels) == 0:
@@ -612,7 +734,23 @@ def api_write():
                 for ch_id in channels:
                     full_mask.enable(ch_id)
                 config.activeChannels(full_mask)
+                if input_range is not None:
+                    ir_set = False
+                    ir_errs = []
+                    for setter in (
+                        lambda: config.inputRange(ch1_mask(), int(input_range)),
+                        lambda: config.inputRange(int(input_range)),
+                    ):
+                        try:
+                            setter()
+                            ir_set = True
+                            break
+                        except Exception as e:
+                            ir_errs.append(str(e))
+                    if not ir_set:
+                        raise RuntimeError("Input Range not set: " + " | ".join(ir_errs))
                 node.applyConfig(config)
+                set_idle_with_retry(node, int(data['node_id']), "after-write", attempts=2, delay_sec=0.8, required=False)
                 # Avoid pinging immediately after write
                 global NEXT_PING_ALLOWED_TS
                 NEXT_PING_ALLOWED_TS = time.time() + PING_COOLDOWN_SEC
@@ -620,6 +758,8 @@ def api_write():
                 cached = NODE_READ_CACHE.get(int(data['node_id']), {})
                 cached['current_rate'] = int(sample_rate)
                 cached['current_power'] = int(tx_power)
+                if input_range is not None:
+                    cached['current_input_range'] = int(input_range)
                 enabled_ids = {int(ch_id) for ch_id in channels}
                 cached['channels'] = [{"id": i, "enabled": (i in enabled_ids)} for i in (1, 2)]
                 cached['ts'] = time.time()

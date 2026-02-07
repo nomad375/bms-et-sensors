@@ -20,6 +20,16 @@
         .channel-menu { position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 10; background: #fff; border: 1px solid #ced4da; border-radius: 6px; padding: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.12); display: none; }
         .channel-menu.open { display: block; }
         .channel-row { display: flex; align-items: center; gap: 8px; padding: 4px 2px; }
+        .node-actions { gap: 0.35rem !important; flex-wrap: nowrap; }
+        .node-actions .btn {
+            padding: 0.12rem 0.35rem;
+            font-size: 0.58rem;
+            min-height: 24px;
+            line-height: 1;
+            white-space: nowrap;
+            width: auto !important;
+            flex: 0 0 auto;
+        }
     </style>
 </head>
 <body>
@@ -35,8 +45,7 @@
                 <div id="baseStatusText" class="small text-muted base-status-text">Status: Unknown</div>
             </div>
             <div class="d-flex gap-2">
-                <button onclick="connectBase()" class="btn btn-outline-secondary btn-sm fw-bold">🔌 Connect & Refresh</button>
-                <button onclick="reconnectBase()" class="btn btn-outline-warning btn-sm fw-bold">🔁 Reconnect</button>
+                <button onclick="connectBase()" class="btn btn-outline-secondary btn-sm fw-bold">🔌 Connect</button>
                 <button id="btnBeacon" onclick="toggleBeacon()" class="btn btn-outline-info btn-sm fw-bold">Beacon: ?</button>
                 <span class="text-muted align-self-center" title="Beacon ON keeps node sync/communication active. Beacon OFF is only for diagnostics/isolation and may make nodes unreachable.">ⓘ</span>
             </div>
@@ -50,11 +59,11 @@
                     <input type="number" id="nodeId" class="form-control" value="16907">
                 </div>
             </div>
-            <div class="col-md-8 d-flex gap-2">
-                <button id="btnReadFast" onclick="readConfig('fast')" class="btn btn-success w-100 fw-bold">FAST READ</button>
-                <button id="btnReadFull" onclick="readConfig('full')" class="btn btn-outline-success w-100 fw-bold">FULL READ</button>
+            <div class="col-md-8 d-flex gap-2 node-actions">
+                <button id="btnRead" onclick="readConfig()" class="btn btn-success fw-bold">READ</button>
                 <button id="btnSetIdle" onclick="setNodeIdle()" class="btn btn-outline-primary fw-bold">Set to Idle</button>
                 <button id="btnCyclePower" onclick="cycleNodePower()" class="btn btn-outline-primary fw-bold">Power Cycle</button>
+                <button id="btnClearStorage" onclick="clearStorage()" class="btn btn-outline-danger fw-bold" disabled>Clear Storage</button>
                 <button id="btnProbe" onclick="probeNode()" class="btn btn-outline-secondary fw-bold">🛰️ PROBE</button>
             </div>
         </div>
@@ -62,10 +71,9 @@
         <div class="small text-muted mt-3 p-2 bg-light rounded">
             <div class="fw-bold text-primary mb-1">Recommended Workflow</div>
             <div>1. Set to Idle</div>
-            <div>2. Full Read once</div>
-            <div>3. Fast Read for routine checks</div>
-            <div>4. Before write: Set to Idle -> Safe Write</div>
-            <div>5. Use Power Cycle only for recovery</div>
+            <div>2. Read</div>
+            <div>3. Before write: Set to Idle -> Safe Write</div>
+            <div>4. Use Power Cycle only for recovery</div>
         </div>
     </div>
 
@@ -83,11 +91,18 @@
                 <div class="col-md-6">
                     <label class="form-label fw-bold">Мощность радио</label>
                     <select id="txPower" class="form-select">
-                        <option value="20">20 dBm (Max)</option>
                         <option value="16">16 dBm</option>
                         <option value="10">10 dBm</option>
                         <option value="5">5 dBm</option>
                         <option value="0">0 dBm (Min)</option>
+                    </select>
+                </div>
+            </div>
+            <div class="row mb-4">
+                <div class="col-md-6">
+                    <label class="form-label fw-bold">Input Range</label>
+                    <select id="inputRange" class="form-select">
+                        <option value="">N/A</option>
                     </select>
                 </div>
             </div>
@@ -121,33 +136,62 @@
 <script>
     async function connectBase() {
         try {
-            const res = await fetch('/api/connect', {method:'POST'});
-            const data = await res.json();
+            let res = await fetch('/api/connect', {method:'POST'});
+            let data = await res.json();
+            if (!data.success) {
+                res = await fetch('/api/reconnect', {method:'POST'});
+                data = await res.json();
+            }
+            const statusDiv = document.getElementById('readStatus');
+            if (data.success) {
+                statusDiv.className = "mt-2 text-center status-ok";
+                statusDiv.innerHTML = "✅ Base connected";
+            } else {
+                statusDiv.className = "mt-2 text-center status-err";
+                statusDiv.innerHTML = `❌ Base connect failed: ${data.message || data.error || 'Unknown error'}`;
+            }
             await refreshBaseStatus();
         } catch (e) { }
     }
 
-    async function readConfig(mode) {
+    async function readConfig() {
         const id = document.getElementById('nodeId').value;
         const statusDiv = document.getElementById('readStatus');
-        const btnFast = document.getElementById('btnReadFast');
-        const btnFull = document.getElementById('btnReadFull');
+        const btnRead = document.getElementById('btnRead');
         
-        btnFast.disabled = true;
-        btnFull.disabled = true;
+        btnRead.disabled = true;
         statusDiv.className = "mt-2 text-center text-primary";
-        statusDiv.innerHTML = mode === 'full' ? "⌛ Full Read..." : "⌛ Fast Read...";
+        statusDiv.innerHTML = "⌛ Reading...";
         document.getElementById('configCard').style.display = "none";
         
         try {
-            const res = await fetch(`/api/read/${id}?mode=${mode}`);
+            const res = await fetch(`/api/read/${id}`);
             const data = await res.json();
             if(data.success) {
                 statusDiv.className = "mt-2 text-center status-ok";
-                statusDiv.innerHTML = mode === 'full' ? "✅ Full Read complete" : "✅ Fast Read complete";
+                statusDiv.innerHTML = "✅ Read complete";
                 document.getElementById('configCard').style.display = "block";
                 
                 document.getElementById('txPower').value = data.current_power;
+                const inputSel = document.getElementById('inputRange');
+                inputSel.innerHTML = "";
+                const inputRanges = Array.isArray(data.supported_input_ranges) ? data.supported_input_ranges : [];
+                if (!inputRanges.length) {
+                    const opt = document.createElement('option');
+                    opt.value = "";
+                    opt.text = "N/A";
+                    opt.selected = true;
+                    inputSel.add(opt);
+                } else {
+                    inputRanges.forEach(r => {
+                        const opt = document.createElement('option');
+                        opt.value = r.value;
+                        opt.text = r.label || `Value ${r.value}`;
+                        if (r.primary) opt.style.fontWeight = "700";
+                        if (String(r.value) === String(data.current_input_range)) opt.selected = true;
+                        inputSel.add(opt);
+                    });
+                }
                 const statusParts = [
                     `Model: ${data.model}`,
                     `FW: ${data.fw}`,
@@ -157,17 +201,12 @@
                     data.frequency ? `Frequency: ${data.frequency}` : null,
                     data.last_comm ? `Last Comm: ${data.last_comm}` : null,
                     data.state_text ? `Last Known State: ${data.state_text}${(data.state !== null && data.state !== undefined) ? ` (${data.state})` : ''}` : null,
-                    (data.sampling_mode_raw !== null && data.sampling_mode_raw !== undefined) ? `EEPROM 24 (Sampling Mode): ${data.sampling_mode_raw}` : `EEPROM 24 (Sampling Mode): N/A`,
                     (data.storage_pct !== null && data.storage_pct !== undefined) ? `Storage: ${data.storage_pct}%` : null,
                     data.sampling_mode ? `Sampling: ${data.sampling_mode}` : null,
                     data.data_mode ? `Data Mode: ${data.data_mode}` : null
                 ].filter(Boolean);
                 document.getElementById('diagArea').innerHTML = statusParts.join(" | ");
-                if (mode === 'full') {
-                    await loadDiagnostics(id);
-                } else {
-                    document.getElementById('diagFlags').innerText = "Diagnostics: run FULL READ";
-                }
+                await loadDiagnostics(id);
 
                 const sel = document.getElementById('sampleRate');
                 sel.innerHTML = "";
@@ -211,13 +250,14 @@
                     `;
                 });
                 updateChannelSummary();
+                document.getElementById('btnClearStorage').disabled = false;
             } else {
                 statusDiv.className = "mt-2 text-center status-err";
                 statusDiv.innerHTML = "❌ Ошибка: " + data.error;
+                document.getElementById('btnClearStorage').disabled = true;
             }
         } finally {
-            btnFast.disabled = false;
-            btnFull.disabled = false;
+            btnRead.disabled = false;
         }
     }
 
@@ -296,10 +336,36 @@
         }
     }
 
+    async function clearStorage() {
+        const id = document.getElementById('nodeId').value;
+        const statusDiv = document.getElementById('readStatus');
+        const btn = document.getElementById('btnClearStorage');
+        btn.disabled = true;
+        statusDiv.className = "mt-2 text-center text-primary";
+        statusDiv.innerHTML = "⏳ Clearing storage...";
+        try {
+            const res = await fetch(`/api/clear_storage/${id}`, {method:'POST'});
+            const data = await res.json();
+            if (data.success) {
+                statusDiv.className = "mt-2 text-center status-ok";
+                statusDiv.innerHTML = "✅ Storage cleared";
+            } else {
+                statusDiv.className = "mt-2 text-center status-err";
+                statusDiv.innerHTML = `❌ ${data.error || 'Clear storage failed'}`;
+            }
+        } catch (e) {
+            statusDiv.className = "mt-2 text-center status-err";
+            statusDiv.innerHTML = "❌ Clear storage failed";
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
     async function applyConfig(isSafe) {
         const id = document.getElementById('nodeId').value;
         const rate = document.getElementById('sampleRate').value;
         const power = document.getElementById('txPower').value;
+        const inputRangeRaw = document.getElementById('inputRange').value;
         const statusDiv = document.getElementById('writeStatus');
         if (!rate || Number.isNaN(parseInt(rate))) {
             statusDiv.className = "mt-3 text-center status-err";
@@ -318,7 +384,13 @@
             const res = await fetch('/api/write', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ node_id: id, sample_rate: parseInt(rate), tx_power: parseInt(power), channels: activeChs })
+                body: JSON.stringify({
+                    node_id: id,
+                    sample_rate: parseInt(rate),
+                    tx_power: parseInt(power),
+                    channels: activeChs,
+                    input_range: inputRangeRaw === "" ? null : parseInt(inputRangeRaw)
+                })
             });
             const data = await res.json();
             statusDiv.innerHTML = data.success ? "<span class='status-ok'>✅ УСПЕШНО СОХРАНЕНО</span>" : `<span class='status-err'>❌ ${data.error}</span>`;
@@ -350,6 +422,11 @@
         }
     });
 
+    document.getElementById('nodeId').addEventListener('input', function() {
+        const btn = document.getElementById('btnClearStorage');
+        if (btn) btn.disabled = true;
+    });
+
     async function refreshBaseStatus() {
         try {
             const res = await fetch('/api/status');
@@ -379,6 +456,7 @@
                 data.base_model ? `Model: ${data.base_model}` : null,
                 data.base_fw ? `FW: ${data.base_fw}` : null,
                 data.base_serial ? `S/N: ${data.base_serial}` : null,
+                data.base_connection ? `Connection: ${data.base_connection}` : null,
                 data.base_region ? `Region: ${data.base_region}` : null,
                 data.base_radio ? `Radio: ${data.base_radio}` : null
             ].filter(Boolean).join(" | ");
@@ -387,13 +465,6 @@
                 data.base_link ? `State: ${data.base_link}` : null
             ].filter(Boolean).join(" | ");
             text.innerText = line2 ? `${line1}\n${line2}` : line1;
-        } catch (e) { }
-    }
-
-    async function reconnectBase() {
-        try {
-            await fetch('/api/reconnect', {method:'POST'});
-            await refreshBaseStatus();
         } catch (e) { }
     }
 
