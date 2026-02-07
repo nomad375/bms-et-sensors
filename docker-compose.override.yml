@@ -1,0 +1,10 @@
+services:
+  redlab-app:
+    build:
+      context: .
+      dockerfile: Dockerfile.redlab # Enables local building for the collector service
+
+  mscl-app:
+    build:
+      context: .
+      dockerfile: Dockerfile.mscl # Enables local building for the MSCL collector service
