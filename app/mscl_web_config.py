@@ -628,7 +628,6 @@ def api_diagnostics(node_id):
                 ("supportsInputRange", "supportsInputRange"),
                 ("supportsLowPassFilter", "supportsLowPassFilter"),
                 ("supportsCommunicationProtocol", "supportsCommunicationProtocol"),
-                ("supportsTransducerType", "supportsTransducerType"),
                 ("supportsTempSensorOptions", "supportsTempSensorOptions"),
             ]
             out = []
