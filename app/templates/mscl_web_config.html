@@ -15,6 +15,11 @@
         .status-ok-pill { background: #dff6e8; color: #1f7a3f; }
         .status-err-pill { background: #fde2e1; color: #b3261e; }
         .base-status-text { white-space: pre-line; }
+        .channel-picker { position: relative; max-width: 280px; }
+        .channel-summary-btn { width: 100%; text-align: left; }
+        .channel-menu { position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 10; background: #fff; border: 1px solid #ced4da; border-radius: 6px; padding: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.12); display: none; }
+        .channel-menu.open { display: block; }
+        .channel-row { display: flex; align-items: center; gap: 8px; padding: 4px 2px; }
     </style>
 </head>
 <body>
@@ -32,6 +37,8 @@
             <div class="d-flex gap-2">
                 <button onclick="connectBase()" class="btn btn-outline-secondary btn-sm fw-bold">🔌 Connect & Refresh</button>
                 <button onclick="reconnectBase()" class="btn btn-outline-warning btn-sm fw-bold">🔁 Reconnect</button>
+                <button id="btnBeacon" onclick="toggleBeacon()" class="btn btn-outline-info btn-sm fw-bold">Beacon: ?</button>
+                <span class="text-muted align-self-center" title="Beacon ON keeps node sync/communication active. Beacon OFF is only for diagnostics/isolation and may make nodes unreachable.">ⓘ</span>
             </div>
         </div>
         <div id="baseStatusPill" class="status-pill status-err-pill mb-3">Disconnected</div>
@@ -44,11 +51,22 @@
                 </div>
             </div>
             <div class="col-md-8 d-flex gap-2">
-                <button id="btnRead" onclick="readConfig(true)" class="btn btn-success w-100 fw-bold">🛡️ SAFE READ</button>
+                <button id="btnReadFast" onclick="readConfig('fast')" class="btn btn-success w-100 fw-bold">FAST READ</button>
+                <button id="btnReadFull" onclick="readConfig('full')" class="btn btn-outline-success w-100 fw-bold">FULL READ</button>
+                <button id="btnSetIdle" onclick="setNodeIdle()" class="btn btn-outline-primary fw-bold">Set to Idle</button>
+                <button id="btnCyclePower" onclick="cycleNodePower()" class="btn btn-outline-primary fw-bold">Power Cycle</button>
                 <button id="btnProbe" onclick="probeNode()" class="btn btn-outline-secondary fw-bold">🛰️ PROBE</button>
             </div>
         </div>
         <div id="readStatus" class="mt-2 text-center fw-bold small"></div>
+        <div class="small text-muted mt-3 p-2 bg-light rounded">
+            <div class="fw-bold text-primary mb-1">Recommended Workflow</div>
+            <div>1. Set to Idle</div>
+            <div>2. Full Read once</div>
+            <div>3. Fast Read for routine checks</div>
+            <div>4. Before write: Set to Idle -> Safe Write</div>
+            <div>5. Use Power Cycle only for recovery</div>
+        </div>
     </div>
 
     <div id="configCard" style="display:none;">
@@ -109,38 +127,47 @@
         } catch (e) { }
     }
 
-    async function readConfig(isSafe) {
+    async function readConfig(mode) {
         const id = document.getElementById('nodeId').value;
         const statusDiv = document.getElementById('readStatus');
-        const btn = document.getElementById('btnRead');
+        const btnFast = document.getElementById('btnReadFast');
+        const btnFull = document.getElementById('btnReadFull');
         
-        btn.disabled = true;
+        btnFast.disabled = true;
+        btnFull.disabled = true;
         statusDiv.className = "mt-2 text-center text-primary";
-        statusDiv.innerHTML = isSafe ? "⌛ Safe Read... попытки и паузы внутри." : "⌛ Чтение...";
+        statusDiv.innerHTML = mode === 'full' ? "⌛ Full Read..." : "⌛ Fast Read...";
         document.getElementById('configCard').style.display = "none";
         
         try {
-            const res = await fetch(`/api/read/${id}`);
+            const res = await fetch(`/api/read/${id}?mode=${mode}`);
             const data = await res.json();
             if(data.success) {
                 statusDiv.className = "mt-2 text-center status-ok";
-                statusDiv.innerHTML = "✅ Настройки получены";
+                statusDiv.innerHTML = mode === 'full' ? "✅ Full Read complete" : "✅ Fast Read complete";
                 document.getElementById('configCard').style.display = "block";
                 
                 document.getElementById('txPower').value = data.current_power;
                 const statusParts = [
                     `Model: ${data.model}`,
                     `FW: ${data.fw}`,
+                    (data.node_address !== null && data.node_address !== undefined) ? `Node Address: ${data.node_address}` : null,
                     `S/N: ${data.sn}`,
                     data.region ? `Region: ${data.region}` : null,
+                    data.frequency ? `Frequency: ${data.frequency}` : null,
                     data.last_comm ? `Last Comm: ${data.last_comm}` : null,
-                    data.state ? `State: ${data.state}` : null,
+                    data.state_text ? `Last Known State: ${data.state_text}${(data.state !== null && data.state !== undefined) ? ` (${data.state})` : ''}` : null,
+                    (data.sampling_mode_raw !== null && data.sampling_mode_raw !== undefined) ? `EEPROM 24 (Sampling Mode): ${data.sampling_mode_raw}` : `EEPROM 24 (Sampling Mode): N/A`,
                     (data.storage_pct !== null && data.storage_pct !== undefined) ? `Storage: ${data.storage_pct}%` : null,
                     data.sampling_mode ? `Sampling: ${data.sampling_mode}` : null,
                     data.data_mode ? `Data Mode: ${data.data_mode}` : null
                 ].filter(Boolean);
                 document.getElementById('diagArea').innerHTML = statusParts.join(" | ");
-                await loadDiagnostics(id);
+                if (mode === 'full') {
+                    await loadDiagnostics(id);
+                } else {
+                    document.getElementById('diagFlags').innerText = "Diagnostics: run FULL READ";
+                }
 
                 const sel = document.getElementById('sampleRate');
                 sel.innerHTML = "";
@@ -160,21 +187,38 @@
 
                 const chArea = document.getElementById('channelsArea');
                 chArea.innerHTML = "";
+                chArea.innerHTML = `
+                    <div class="channel-picker" id="channelPicker">
+                        <button type="button" class="btn btn-outline-secondary channel-summary-btn" id="channelSummaryBtn" onclick="toggleChannelsMenu(event)">
+                            0 active
+                        </button>
+                        <div class="channel-menu" id="channelMenu"></div>
+                    </div>
+                `;
+                const channelNames = {
+                    1: "Raw Data (ch1)",
+                    2: "CJC Temperature (ch2)"
+                };
+                const menu = document.getElementById('channelMenu');
                 data.channels.forEach(ch => {
                     let checked = ch.enabled ? "checked" : "";
-                    chArea.innerHTML += `
-                        <div class="border rounded p-2 mb-2 bg-white d-flex justify-content-between align-items-center">
-                            <div class="form-check form-switch m-0">
-                                <input class="form-check-input ch-enable" type="checkbox" id="ch_${ch.id}" ${checked}>
-                                <label class="form-check-label fw-bold">Канал ${ch.id}</label>
-                            </div>
-                        </div>`;
+                    const label = channelNames[ch.id] || `Channel ${ch.id}`;
+                    menu.innerHTML += `
+                        <label class="channel-row">
+                            <input class="form-check-input ch-enable" type="checkbox" id="ch_${ch.id}" ${checked} onchange="updateChannelSummary()">
+                            <span>${label}</span>
+                        </label>
+                    `;
                 });
+                updateChannelSummary();
             } else {
                 statusDiv.className = "mt-2 text-center status-err";
                 statusDiv.innerHTML = "❌ Ошибка: " + data.error;
             }
-        } finally { btn.disabled = false; }
+        } finally {
+            btnFast.disabled = false;
+            btnFull.disabled = false;
+        }
     }
 
     async function probeNode() {
@@ -202,11 +246,66 @@
         }
     }
 
+    async function setNodeIdle() {
+        const id = document.getElementById('nodeId').value;
+        const statusDiv = document.getElementById('readStatus');
+        const btn = document.getElementById('btnSetIdle');
+        btn.disabled = true;
+        statusDiv.className = "mt-2 text-center text-primary";
+        statusDiv.innerHTML = "⏳ Sending Set to Idle...";
+        try {
+            const res = await fetch(`/api/node_idle/${id}`, {method:'POST'});
+            const data = await res.json();
+            if (data.success) {
+                statusDiv.className = "mt-2 text-center status-ok";
+                statusDiv.innerHTML = "✅ Node set to Idle";
+            } else {
+                statusDiv.className = "mt-2 text-center status-err";
+                statusDiv.innerHTML = `❌ ${data.error}`;
+            }
+        } catch (e) {
+            statusDiv.className = "mt-2 text-center status-err";
+            statusDiv.innerHTML = "❌ Set to Idle failed";
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    async function cycleNodePower() {
+        const id = document.getElementById('nodeId').value;
+        const statusDiv = document.getElementById('readStatus');
+        const btn = document.getElementById('btnCyclePower');
+        btn.disabled = true;
+        statusDiv.className = "mt-2 text-center text-primary";
+        statusDiv.innerHTML = "⏳ Sending Power Cycle...";
+        try {
+            const res = await fetch(`/api/node_cycle_power/${id}`, {method:'POST'});
+            const data = await res.json();
+            if (data.success) {
+                statusDiv.className = "mt-2 text-center status-ok";
+                statusDiv.innerHTML = "✅ Power cycle command sent";
+            } else {
+                statusDiv.className = "mt-2 text-center status-err";
+                statusDiv.innerHTML = `❌ ${data.error}`;
+            }
+        } catch (e) {
+            statusDiv.className = "mt-2 text-center status-err";
+            statusDiv.innerHTML = "❌ Power cycle failed";
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
     async function applyConfig(isSafe) {
         const id = document.getElementById('nodeId').value;
         const rate = document.getElementById('sampleRate').value;
         const power = document.getElementById('txPower').value;
         const statusDiv = document.getElementById('writeStatus');
+        if (!rate || Number.isNaN(parseInt(rate))) {
+            statusDiv.className = "mt-3 text-center status-err";
+            statusDiv.innerHTML = "❌ Sample Rate is unknown (N/A). Run FULL READ once or configure in SensorConnect.";
+            return;
+        }
         
         let activeChs = [];
         document.querySelectorAll('.ch-enable').forEach(cb => {
@@ -226,6 +325,31 @@
         } catch (e) { }
     }
 
+    function updateChannelSummary() {
+        const all = document.querySelectorAll('.ch-enable');
+        let active = 0;
+        all.forEach(cb => { if (cb.checked) active += 1; });
+        const btn = document.getElementById('channelSummaryBtn');
+        if (btn) btn.innerText = `${active} active`;
+    }
+
+    function toggleChannelsMenu(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        const menu = document.getElementById('channelMenu');
+        if (!menu) return;
+        menu.classList.toggle('open');
+    }
+
+    document.addEventListener('click', function(evt) {
+        const picker = document.getElementById('channelPicker');
+        const menu = document.getElementById('channelMenu');
+        if (!picker || !menu) return;
+        if (!picker.contains(evt.target)) {
+            menu.classList.remove('open');
+        }
+    });
+
     async function refreshBaseStatus() {
         try {
             const res = await fetch('/api/status');
@@ -238,6 +362,15 @@
             } else {
                 pill.className = "status-pill status-err-pill mb-3";
                 pill.innerText = "Disconnected";
+            }
+            window.currentBeaconState = data.beacon_state;
+            const beaconBtn = document.getElementById('btnBeacon');
+            if (data.beacon_state === true) {
+                beaconBtn.innerText = "Beacon: ON";
+            } else if (data.beacon_state === false) {
+                beaconBtn.innerText = "Beacon: OFF";
+            } else {
+                beaconBtn.innerText = "Beacon: ?";
             }
             const line1 = [
                 `Status: ${data.message}`,
@@ -260,6 +393,28 @@
     async function reconnectBase() {
         try {
             await fetch('/api/reconnect', {method:'POST'});
+            await refreshBaseStatus();
+        } catch (e) { }
+    }
+
+    async function toggleBeacon() {
+        try {
+            const current = window.currentBeaconState;
+            const target = (current === true) ? false : true;
+            const res = await fetch('/api/beacon', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({enabled: target})
+            });
+            const data = await res.json();
+            const statusDiv = document.getElementById('readStatus');
+            if (!data.success) {
+                statusDiv.className = "mt-2 text-center status-err";
+                statusDiv.innerHTML = `❌ ${data.error}`;
+            } else {
+                statusDiv.className = "mt-2 text-center status-ok";
+                statusDiv.innerHTML = `✅ ${data.message}`;
+            }
             await refreshBaseStatus();
         } catch (e) { }
     }

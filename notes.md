@@ -41,6 +41,18 @@ Stabilize MSCL Configurator for TC-Link-200 OEM nodes, improve base station stab
 - `app/templates/mscl_web_config.html`
 - `notes.md`
 
+## Stable Operating Workflow (Current)
+- Set to Idle
+- Full Read once (to refresh cached EEPROM-heavy fields)
+- Fast Read for routine checks
+- Before any write: Set to Idle -> Safe Write
+- Use Power Cycle only for recovery when communication degrades
+
+## Runtime Notes
+- Fast Read is cache-first and avoids EEPROM-heavy reads to improve stability.
+- Full Read may occasionally show EEPROM warnings, but fallback keeps the UI usable.
+- Beacon should stay ON during normal node communication and configuration.
+
 ## расшифровка LED по TC‑Link‑200‑OEM, согласно руководству:
 
 OFF — нода выключена.
