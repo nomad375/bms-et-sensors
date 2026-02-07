@@ -61,3 +61,40 @@ OFF — нода выключена.
 Один зелёный всплеск раз в 2 сек — Sampling.
 Синий во время sampling — resynchronizing (нода пытается восстановить синхронизацию).
 Красный LED — ошибка самотеста (Built‑in test error).
+
+
+### TEMP Note
+Есть у нас (изменяемые):
+
+    Sample Rate
+    Transmit Power
+    Input Range
+    Active Channels (ch1/ch2)
+
+Есть у нас, но read-only в статусе (не изменяемые в форме):
+    Comm Protocol
+    State
+    Storage
+    Sampling
+    Data Mode
+    Frequency/Region/Last Comm
+
+Нет у нас (из списка SensorConnect):
+    Transducer Type
+    Sensor Type (RTD types)
+    Wire Type
+    Low Pass Filter / Filter Cutoff
+    Linear Calibration Units (Ohm/mOhm/kOhm, C/F/K)
+    Lost Beacon Timeout (toggle + value)
+    Diagnostic Info Interval (toggle + value)
+    Storage Limit Mode (Stop/Overwrite)
+    Default Operation Mode (Idle/Sleep/Sample)
+    User Inactivity Timeout
+    Check Radio Interval
+
+
+Что советую добавить следующим шагом (по полезности/риску):
+    Low Pass Filter (3 значения)
+    Storage Limit Mode (Stop/Overwrite)
+    Lost Beacon Timeout + Diagnostic Info Interval
+    Это даст максимум пользы при минимальном риске поломки чтения/записи.
