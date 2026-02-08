@@ -23,11 +23,11 @@
             max-height: 200px;
             overflow-y: auto;
         }
-        .status-pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 0.8rem; }
+        .status-pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 0.68rem; }
         .status-ok-pill { background: #dff6e8; color: #1f7a3f; }
         .status-warn-pill { background: #fff4d6; color: #8a5a00; }
         .status-err-pill { background: #fde2e1; color: #b3261e; }
-        .base-status-text { white-space: pre-line; }
+        .base-status-text { white-space: pre-line; font-size: 0.66rem; line-height: 1.2; }
         .channel-picker { position: relative; max-width: 280px; }
         .channel-summary-btn { width: 100%; text-align: left; }
         .channel-menu { position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 10; background: #fff; border: 1px solid #ced4da; border-radius: 6px; padding: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.12); display: none; }
@@ -590,6 +590,9 @@
                     activeChannelsText ? `Active Channels: ${activeChannelsText}` : null,
                     data.sampling_mode ? `Sampling: ${data.sampling_mode}` : null,
                     (data.data_mode && String(data.data_mode) !== "1") ? `Data Mode: ${data.data_mode}` : null,
+                    (data.storage_capacity_raw !== null && data.storage_capacity_raw !== undefined)
+                        ? `Storage Capacity: ${formatStorageCapacity(data.storage_capacity_raw)}`
+                        : null,
                     (storagePctNum !== null)
                         ? (storageDanger
                             ? `<span class='status-err'>Storage: ${storagePctNum}%</span>`
@@ -676,6 +679,14 @@
         const mi = String(dt.getMinutes()).padStart(2, "0");
         const ss = String(dt.getSeconds()).padStart(2, "0");
         return `${yyyy}-${mm}-${dd} ${hh}:${mi}:${ss}`;
+    }
+
+    function formatStorageCapacity(capRaw) {
+        const n = Number(capRaw);
+        if (!Number.isFinite(n) || n < 0) return null;
+        if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(2)} MiB (${n})`;
+        if (n >= 1024) return `${(n / 1024).toFixed(2)} KiB (${n})`;
+        return `${n}`;
     }
 
     async function probeNode() {
