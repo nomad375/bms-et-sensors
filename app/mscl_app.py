@@ -41,7 +41,18 @@ BASE_BEACON_STATE = None
 NODE_FRESH_COMM_SEC = 45
 NODE_ACTIVE_STATE_FRESH_SEC = 8
 SAMPLE_STOP_TOKENS = {}
+SAMPLE_RUNS = {}
 IDLE_IN_PROGRESS = set()
+SAMPLING_MODE_MAP = {
+    "log": 2,
+    "transmit": 1,
+    "log_and_transmit": 3,
+}
+SAMPLING_MODE_LABELS = {
+    "log": "Log",
+    "transmit": "Transmit",
+    "log_and_transmit": "Log and Transmit",
+}
 
 def log(msg):
     print(msg, flush=True)
@@ -56,6 +67,7 @@ RATE_MAP = {
     118: "4 kHz", 119: "8 kHz", 120: "16 kHz", 121: "32 kHz",
     122: "64 kHz", 123: "128 kHz"
 }
+TC_LINK_200_RATE_ENUMS = {106, 107, 108, 109, 110, 111, 112, 113}
 COMM_PROTOCOL_MAP = {
     0: "LXRS",
     1: "LXRS+",
@@ -97,6 +109,11 @@ DEFAULT_MODE_LABELS = {
     1: "Low Duty Cycle",
     5: "Sleep",
     6: "Sample (Sync)",
+}
+DATA_MODE_LABELS = {
+    1: "Live Radio",
+    2: "Datalog Only",
+    3: "Live Radio + Datalog",
 }
 
 def _wt(name, default=None):
@@ -497,6 +514,160 @@ def _schedule_idle_after(node_id, seconds, token):
         except Exception as e:
             log(f"[mscl-web] [SAMPLE] auto-idle failed node_id={node_id}: {e}")
 
+
+def _sampling_duration_to_seconds(duration_value, duration_units, continuous):
+    if continuous:
+        return 0
+    try:
+        value = float(duration_value)
+    except Exception:
+        value = 0.0
+    if value < 0:
+        value = 0.0
+    unit = str(duration_units or "seconds").lower()
+    mult = 1.0
+    if unit.startswith("min"):
+        mult = 60.0
+    elif unit.startswith("hour"):
+        mult = 3600.0
+    seconds = int(value * mult)
+    return max(0, min(seconds, 86400))
+
+
+def _set_sampling_mode_on_node(cfg, mode_key):
+    mode_key = str(mode_key or "transmit").lower()
+    mode_value = SAMPLING_MODE_MAP.get(mode_key, SAMPLING_MODE_MAP["transmit"])
+    errs = []
+    for setter in (
+        lambda: cfg.dataMode(int(mode_value)),
+        lambda: cfg.dataCollectionMethod(int(mode_value)),
+    ):
+        try:
+            setter()
+            return mode_value, None
+        except Exception as e:
+            errs.append(str(e))
+    return None, " | ".join(errs) if errs else "no setter available"
+
+
+def _is_tc_link_200_model(model):
+    s = str(model or "").strip().lower()
+    return ("tc-link-200" in s) or s.startswith("63104100")
+
+
+def _filter_sample_rates_for_model(model, supported_rates, current_rate):
+    rates = list(supported_rates or [])
+    if not _is_tc_link_200_model(model):
+        return rates
+
+    filtered = []
+    for r in rates:
+        try:
+            rid = int(r.get("enum_val"))
+        except Exception:
+            continue
+        if rid in TC_LINK_200_RATE_ENUMS:
+            filtered.append(r)
+
+    # Keep currently reported rate visible even if it is outside filtered list.
+    if current_rate is not None:
+        try:
+            cur = int(current_rate)
+            if all(int(x.get("enum_val")) != cur for x in filtered):
+                filtered.insert(0, {"enum_val": cur, "str_val": RATE_MAP.get(cur, f"{cur} (current)")})
+        except Exception:
+            pass
+    return filtered
+
+
+def _start_sampling_run(node_id, body):
+    global BASE_STATION
+    ok, msg = internal_connect()
+    if not ok or BASE_STATION is None:
+        return {"success": False, "error": f"Base station not connected: {msg}"}
+
+    mode_key = str(body.get("log_transmit_mode") or "transmit").lower()
+    data_type = str(body.get("data_type") or "float").lower()
+    continuous = bool(body.get("continuous", False))
+    duration_value = body.get("duration_value", 60)
+    duration_units = body.get("duration_units", "seconds")
+    duration_sec = _sampling_duration_to_seconds(duration_value, duration_units, continuous)
+    sample_rate = body.get("sample_rate")
+    if sample_rate is not None and str(sample_rate) != "":
+        try:
+            sample_rate = int(sample_rate)
+        except Exception:
+            sample_rate = None
+    else:
+        sample_rate = None
+
+    try:
+        ensure_beacon_on()
+        node = mscl.WirelessNode(node_id, BASE_STATION)
+        node.readWriteRetries(10)
+        cfg = mscl.WirelessNodeConfig()
+        # Keep runtime sampling config explicit and minimal.
+        try:
+            cfg.samplingMode(mscl.WirelessTypes.samplingMode_sync)
+        except Exception:
+            pass
+
+        sample_rate_set = False
+        if sample_rate is not None:
+            try:
+                cfg.sampleRate(int(sample_rate))
+                sample_rate_set = True
+            except Exception as e:
+                log(f"[mscl-web] [S-RUN] sampleRate not set node_id={node_id}: {e}")
+
+        mode_value, mode_err = _set_sampling_mode_on_node(cfg, mode_key)
+        if mode_value is None:
+            log(f"[mscl-web] [S-RUN] mode not set node_id={node_id}: {mode_err}")
+
+        apply_ok = False
+        try:
+            node.applyConfig(cfg)
+            apply_ok = True
+        except Exception as e:
+            # Keep behavior permissive: if apply fails, try start anyway.
+            log(f"[mscl-web] [S-RUN] applyConfig warning node_id={node_id}: {e}")
+
+        start_mode = _start_sampling_best_effort(node, node_id)
+        token = time.time()
+        SAMPLE_STOP_TOKENS[node_id] = token
+        run = {
+            "run_id": f"{node_id}-{int(token)}",
+            "state": "running",
+            "started_at": int(time.time()),
+            "duration_sec": int(duration_sec),
+            "continuous": bool(duration_sec == 0),
+            "mode_key": mode_key,
+            "mode_label": SAMPLING_MODE_LABELS.get(mode_key, mode_key),
+            "mode_value": mode_value,
+            "data_type": data_type,
+            "sample_rate": sample_rate,
+            "sample_rate_set": sample_rate_set,
+            "apply_config_ok": apply_ok,
+            "start_method": start_mode,
+        }
+        SAMPLE_RUNS[node_id] = run
+        if duration_sec > 0:
+            t = threading.Thread(target=_schedule_idle_after, args=(node_id, duration_sec, token), daemon=True)
+            t.start()
+        if sample_rate is not None:
+            rate_txt = RATE_MAP.get(int(sample_rate), f"{sample_rate} (unknown)")
+            rate_log = f"{sample_rate} ({rate_txt})"
+        else:
+            rate_log = "keep"
+        log(
+            f"[mscl-web] [S-RUN] start ok node_id={node_id} mode={run['mode_label']} "
+            f"dur={duration_sec}s rate={rate_log}"
+        )
+        return {"success": True, "run": run}
+    except Exception as e:
+        log(f"[mscl-web] [S-RUN] start failed node_id={node_id}: {e}")
+        return {"success": False, "error": str(e)}
+
 @app.route('/')
 def index(): return render_template_string(TEMPLATE_PATH.read_text())
 
@@ -684,6 +855,22 @@ def api_diagnostics(node_id):
                     out.append({"name": label, "value": bool(getattr(features, fn)())})
                 except Exception:
                     out.append({"name": label, "value": False})
+            try:
+                raw_modes = []
+                try:
+                    raw_modes = features.dataModes()
+                except Exception:
+                    raw_modes = []
+                mode_parts = []
+                for m in raw_modes:
+                    mi = int(m)
+                    mode_parts.append(f"{mi} ({DATA_MODE_LABELS.get(mi, f'Value {mi}')})")
+                out.append({
+                    "name": "supportedDataModes",
+                    "value": ", ".join(mode_parts) if mode_parts else "N/A",
+                })
+            except Exception:
+                out.append({"name": "supportedDataModes", "value": "N/A"})
             return jsonify(success=True, flags=out)
         except Exception as e:
             return jsonify(success=False, error=str(e))
@@ -824,12 +1011,49 @@ def api_read(node_id):
                         sampling_mode = "sync" if sampling_mode_val == mscl.WirelessTypes.samplingMode_sync else "non_sync"
                     except Exception:
                         pass
-                data_mode = cached.get("data_mode")
-                if refresh_eeprom or "data_mode" not in cached:
+                current_data_mode = cached.get("current_data_mode")
+                data_mode_options = cached.get("data_mode_options", [])
+                if refresh_eeprom or "current_data_mode" not in cached:
                     try:
-                        data_mode = str(node.getDataMode())
+                        current_data_mode = int(node.getDataMode())
                     except Exception:
                         pass
+                if refresh_eeprom or not data_mode_options:
+                    try:
+                        features = node.features()
+                        modes = []
+                        try:
+                            modes = features.dataModes()
+                        except Exception:
+                            modes = []
+                        opts = []
+                        for m in modes:
+                            mi = int(m)
+                            opts.append({"value": mi, "label": DATA_MODE_LABELS.get(mi, f"Value {mi}")})
+                        data_mode_options = opts
+                    except Exception:
+                        if not data_mode_options:
+                            data_mode_options = []
+                if current_data_mode is not None:
+                    if all(x.get("value") != int(current_data_mode) for x in data_mode_options):
+                        data_mode_options.insert(
+                            0,
+                            {
+                                "value": int(current_data_mode),
+                                "label": DATA_MODE_LABELS.get(int(current_data_mode), f"Value {int(current_data_mode)}"),
+                            },
+                        )
+                if not data_mode_options:
+                    data_mode_options = [
+                        {"value": 1, "label": DATA_MODE_LABELS[1]},
+                        {"value": 2, "label": DATA_MODE_LABELS[2]},
+                        {"value": 3, "label": DATA_MODE_LABELS[3]},
+                    ]
+                data_mode_text = (
+                    DATA_MODE_LABELS.get(int(current_data_mode), f"Value {int(current_data_mode)}")
+                    if current_data_mode is not None
+                    else None
+                )
                 current_input_range = cached.get("current_input_range")
                 supported_input_ranges = cached.get("supported_input_ranges", [])
                 if refresh_eeprom or "current_input_range" not in cached:
@@ -1236,6 +1460,7 @@ def api_read(node_id):
                             supported_rates.append({"enum_val": rid, "str_val": RATE_MAP.get(rid, str(rid) + " Hz")})
                     except Exception as e:
                         log(f"[mscl-web] [{read_tag}] warn node_id={node_id}: features/sampleRates failed: {e}")
+                supported_rates = _filter_sample_rates_for_model(model, supported_rates, current_rate)
             
                 channels = []
                 if active_mask is not None:
@@ -1251,7 +1476,8 @@ def api_read(node_id):
                     success=True, model=model, sn=sn, fw=fw,
                     region=region, last_comm=last_comm, state=state, state_text=state_text,
                     node_address=node_address, frequency=frequency,
-                    storage_pct=storage_pct, storage_capacity_raw=storage_capacity_raw, sampling_mode=sampling_mode, sampling_mode_raw=sampling_mode_raw, data_mode=data_mode,
+                    storage_pct=storage_pct, storage_capacity_raw=storage_capacity_raw, sampling_mode=sampling_mode, sampling_mode_raw=sampling_mode_raw,
+                    current_data_mode=current_data_mode, data_mode_text=data_mode_text, data_mode_options=data_mode_options,
                     current_input_range=current_input_range, supported_input_ranges=supported_input_ranges,
                     current_unit=current_unit, unit_options=unit_options,
                     current_cjc_unit=current_cjc_unit, cjc_unit_options=cjc_unit_options,
@@ -1393,34 +1619,103 @@ def api_node_cycle_power(node_id):
 
 @app.route('/api/node_sampling/<int:node_id>', methods=['POST'])
 def api_node_sampling(node_id):
+    with OP_LOCK:
+        body = request.json or {}
+        # Backward compatibility path (old UI sent only duration_sec).
+        if "duration_sec" in body:
+            body = {
+                "duration_value": int(body.get("duration_sec", 0) or 0),
+                "duration_units": "seconds",
+                "continuous": int(body.get("duration_sec", 0) or 0) <= 0,
+                "log_transmit_mode": "transmit",
+                "data_type": "float",
+                "sample_rate": None,
+            }
+        res = _start_sampling_run(node_id, body)
+        if not res.get("success"):
+            return jsonify(success=False, error=res.get("error", "Sampling start failed"))
+        run = res["run"]
+        return jsonify(success=True, message=f"Sampling started ({run['start_method']})", run=run)
+
+
+@app.route('/api/sampling/start/<int:node_id>', methods=['POST'])
+def api_sampling_start(node_id):
+    with OP_LOCK:
+        body = request.json or {}
+        res = _start_sampling_run(node_id, body)
+        if not res.get("success"):
+            return jsonify(success=False, error=res.get("error", "Sampling start failed"))
+        return jsonify(success=True, run=res["run"])
+
+
+@app.route('/api/sampling/stop/<int:node_id>', methods=['POST'])
+def api_sampling_stop(node_id):
     global BASE_STATION
     with OP_LOCK:
         ok, msg = internal_connect()
         if not ok or BASE_STATION is None:
             return jsonify(success=False, error=f"Base station not connected: {msg}")
-        body = request.json or {}
-        try:
-            duration_sec = int(body.get("duration_sec", 0))
-        except Exception:
-            duration_sec = 0
-        if duration_sec < 0:
-            duration_sec = 0
-        if duration_sec > 86400:
-            duration_sec = 86400
         try:
             ensure_beacon_on()
             node = mscl.WirelessNode(node_id, BASE_STATION)
             node.readWriteRetries(10)
-            mode = _start_sampling_best_effort(node, node_id)
-            token = time.time()
-            SAMPLE_STOP_TOKENS[node_id] = token
-            if duration_sec > 0:
-                t = threading.Thread(target=_schedule_idle_after, args=(node_id, duration_sec, token), daemon=True)
-                t.start()
-            return jsonify(success=True, message=f"Sampling started ({mode})", duration_sec=duration_sec)
+            idle_status = send_idle_sensorconnect_style(node, node_id, "stop-sampling")
+            SAMPLE_STOP_TOKENS[node_id] = time.time()
+            run = SAMPLE_RUNS.get(node_id, {})
+            run.update({
+                "state": "stopped",
+                "stopped_at": int(time.time()),
+                "idle_result": idle_status.get("idle_result"),
+            })
+            SAMPLE_RUNS[node_id] = run
+            if idle_status.get("state_confirmed"):
+                log(f"[mscl-web] [S-RUN] stop ok node_id={node_id}")
+                return jsonify(success=True, message="Sampling stopped", idle_status=idle_status, run=run)
+            reason = idle_status.get("reason", "pending")
+            log(f"[mscl-web] [S-RUN] stop pending node_id={node_id}: {reason}")
+            return jsonify(success=True, message=f"Stop sent ({reason})", idle_status=idle_status, run=run)
         except Exception as e:
-            log(f"[mscl-web] [SAMPLE] failed node_id={node_id}: {e}")
+            log(f"[mscl-web] [S-RUN] stop failed node_id={node_id}: {e}")
             return jsonify(success=False, error=str(e))
+
+
+@app.route('/api/sampling/status/<int:node_id>')
+def api_sampling_status(node_id):
+    global BASE_STATION
+    with OP_LOCK:
+        state_num = None
+        state_text = "Unknown"
+        freshness_reason = None
+        link_state = "offline"
+        ok, msg = internal_connect(force_ping=False)
+        if ok and BASE_STATION is not None:
+            try:
+                node = mscl.WirelessNode(node_id, BASE_STATION)
+                node.readWriteRetries(5)
+                state_num, state_text, freshness_reason = _node_state_info(node)
+                link_state = "ok"
+            except Exception as e:
+                link_state = f"degraded: {e}"
+        else:
+            link_state = f"offline: {msg}"
+
+        run = SAMPLE_RUNS.get(node_id, {})
+        now = int(time.time())
+        duration_sec = int(run.get("duration_sec") or 0)
+        started_at = int(run.get("started_at") or 0)
+        time_left = None
+        if duration_sec > 0 and started_at > 0:
+            time_left = max(0, duration_sec - max(0, now - started_at))
+        return jsonify(
+            success=True,
+            node_id=node_id,
+            node_state=state_text,
+            node_state_num=state_num,
+            freshness_reason=freshness_reason,
+            link_state=link_state,
+            run=run,
+            time_left_sec=time_left,
+        )
 
 @app.route('/api/node_sleep/<int:node_id>', methods=['POST'])
 def api_node_sleep(node_id):
@@ -1514,62 +1809,86 @@ def api_write():
                         return bool(v)
                     return False
 
+                has_sample_rate = 'sample_rate' in data
+                has_tx_power = 'tx_power' in data
+                has_channels = 'channels' in data
+                has_input_range = 'input_range' in data
+                has_unit = 'unit' in data
+                has_cjc_unit = 'cjc_unit' in data
+                has_low_pass_filter = 'low_pass_filter' in data
+                has_storage_limit_mode = 'storage_limit_mode' in data
+                has_lost_beacon_timeout = 'lost_beacon_timeout' in data
+                has_diagnostic_interval = 'diagnostic_interval' in data
+                has_lost_beacon_enabled = 'lost_beacon_enabled' in data
+                has_diagnostic_enabled = 'diagnostic_enabled' in data
+                has_default_mode = 'default_mode' in data
+                has_inactivity_timeout = 'inactivity_timeout' in data
+                has_inactivity_enabled = 'inactivity_enabled' in data
+                has_check_radio_interval = 'check_radio_interval' in data
+                has_data_mode = 'data_mode' in data
+                has_transducer_type = 'transducer_type' in data
+                has_sensor_type = 'sensor_type' in data
+                has_wire_type = 'wire_type' in data
+
                 sample_rate = _to_opt_int(data.get('sample_rate'))
                 tx_power = _to_opt_int(data.get('tx_power'))
                 channels = data.get('channels')
-                input_range = _to_opt_int(data.get('input_range'))
-                unit = _to_opt_int(data.get('unit'))
-                cjc_unit = _to_opt_int(data.get('cjc_unit'))
-                low_pass_filter = _to_opt_int(data.get('low_pass_filter'))
-                storage_limit_mode = _to_opt_int(data.get('storage_limit_mode'))
-                lost_beacon_timeout = _to_opt_int(data.get('lost_beacon_timeout'))
-                diagnostic_interval = _to_opt_int(data.get('diagnostic_interval'))
-                lost_beacon_enabled = _to_opt_bool(data.get('lost_beacon_enabled'))
-                diagnostic_enabled = _to_opt_bool(data.get('diagnostic_enabled'))
-                default_mode = _to_opt_int(data.get('default_mode'))
-                inactivity_timeout = _to_opt_int(data.get('inactivity_timeout'))
-                inactivity_enabled = _to_opt_bool(data.get('inactivity_enabled'))
-                check_radio_interval = _to_opt_int(data.get('check_radio_interval'))
-                transducer_type = _to_opt_int(data.get('transducer_type'))
-                sensor_type = _to_opt_int(data.get('sensor_type'))
-                wire_type = _to_opt_int(data.get('wire_type'))
+                input_range = _to_opt_int(data.get('input_range')) if has_input_range else None
+                unit = _to_opt_int(data.get('unit')) if has_unit else None
+                cjc_unit = _to_opt_int(data.get('cjc_unit')) if has_cjc_unit else None
+                low_pass_filter = _to_opt_int(data.get('low_pass_filter')) if has_low_pass_filter else None
+                storage_limit_mode = _to_opt_int(data.get('storage_limit_mode')) if has_storage_limit_mode else None
+                lost_beacon_timeout = _to_opt_int(data.get('lost_beacon_timeout')) if has_lost_beacon_timeout else None
+                diagnostic_interval = _to_opt_int(data.get('diagnostic_interval')) if has_diagnostic_interval else None
+                lost_beacon_enabled = _to_opt_bool(data.get('lost_beacon_enabled')) if has_lost_beacon_enabled else False
+                diagnostic_enabled = _to_opt_bool(data.get('diagnostic_enabled')) if has_diagnostic_enabled else False
+                default_mode = _to_opt_int(data.get('default_mode')) if has_default_mode else None
+                inactivity_timeout = _to_opt_int(data.get('inactivity_timeout')) if has_inactivity_timeout else None
+                inactivity_enabled = _to_opt_bool(data.get('inactivity_enabled')) if has_inactivity_enabled else False
+                check_radio_interval = _to_opt_int(data.get('check_radio_interval')) if has_check_radio_interval else None
+                data_mode = _to_opt_int(data.get('data_mode')) if has_data_mode else None
+                transducer_type = _to_opt_int(data.get('transducer_type')) if has_transducer_type else None
+                sensor_type = _to_opt_int(data.get('sensor_type')) if has_sensor_type else None
+                wire_type = _to_opt_int(data.get('wire_type')) if has_wire_type else None
+                cached = NODE_READ_CACHE.get(int(data['node_id']), {})
                 if sample_rate is None or tx_power is None:
-                    cached = NODE_READ_CACHE.get(int(data['node_id']), {})
                     if sample_rate is None:
                         sample_rate = cached.get('current_rate')
                     if tx_power is None:
                         tx_power = cached.get('current_power')
-                    if input_range is None:
+                    if has_input_range and input_range is None:
                         input_range = cached.get('current_input_range')
-                    if unit is None:
+                    if has_unit and unit is None:
                         unit = cached.get('current_unit')
-                    if cjc_unit is None:
+                    if has_cjc_unit and cjc_unit is None:
                         cjc_unit = cached.get('current_cjc_unit')
-                    if low_pass_filter is None:
+                    if has_low_pass_filter and low_pass_filter is None:
                         low_pass_filter = cached.get('current_low_pass')
-                if storage_limit_mode is None:
+                if has_storage_limit_mode and storage_limit_mode is None:
                     storage_limit_mode = cached.get('current_storage_limit_mode')
-                if lost_beacon_timeout is None:
+                if has_lost_beacon_timeout and lost_beacon_timeout is None:
                     lost_beacon_timeout = cached.get('current_lost_beacon_timeout')
-                if diagnostic_interval is None:
+                if has_diagnostic_interval and diagnostic_interval is None:
                     diagnostic_interval = cached.get('current_diagnostic_interval')
-                    if default_mode is None:
-                        default_mode = cached.get('current_default_mode')
-                    if inactivity_timeout is None:
-                        inactivity_timeout = cached.get('current_inactivity_timeout')
-                if check_radio_interval is None:
+                if has_default_mode and default_mode is None:
+                    default_mode = cached.get('current_default_mode')
+                if has_inactivity_timeout and inactivity_timeout is None:
+                    inactivity_timeout = cached.get('current_inactivity_timeout')
+                if has_check_radio_interval and check_radio_interval is None:
                     check_radio_interval = cached.get('current_check_radio_interval')
-                    if transducer_type is None:
-                        transducer_type = cached.get('current_transducer_type')
-                    if sensor_type is None:
-                        sensor_type = cached.get('current_sensor_type')
-                    if wire_type is None:
-                        wire_type = cached.get('current_wire_type')
-                if 'lost_beacon_enabled' not in data:
+                if has_transducer_type and transducer_type is None:
+                    transducer_type = cached.get('current_transducer_type')
+                if has_sensor_type and sensor_type is None:
+                    sensor_type = cached.get('current_sensor_type')
+                if has_wire_type and wire_type is None:
+                    wire_type = cached.get('current_wire_type')
+                if has_data_mode and data_mode is None:
+                    data_mode = cached.get('current_data_mode')
+                if not has_lost_beacon_enabled:
                     lost_beacon_enabled = bool((lost_beacon_timeout is not None) and (int(lost_beacon_timeout) > 0))
-                if 'diagnostic_enabled' not in data:
+                if not has_diagnostic_enabled:
                     diagnostic_enabled = bool((diagnostic_interval is not None) and (int(diagnostic_interval) > 0))
-                if 'inactivity_enabled' not in data:
+                if not has_inactivity_enabled:
                     inactivity_enabled = bool((inactivity_timeout is not None) and (int(inactivity_timeout) > 0))
                 if sample_rate is None:
                     return jsonify(success=False, error="Sample Rate is unknown. Run FULL READ once or set node in SensorConnect.")
@@ -1578,7 +1897,7 @@ def api_write():
                 if int(tx_power) > 16:
                     log(f"[mscl-web] Write warn node_id={data.get('node_id')}: tx_power={tx_power} exceeds node limit, clamped to 16 dBm")
                     tx_power = 16
-                if not isinstance(channels, list):
+                if not has_channels or not isinstance(channels, list):
                     channels = [1]
                 channels = [int(ch) for ch in channels if _to_opt_int(ch) in (1, 2)]
                 if len(channels) == 0:
@@ -1726,6 +2045,26 @@ def api_write():
                             supports_check_radio_interval = True
                         except Exception as e:
                             log(f"[mscl-web] Write warn node_id={data.get('node_id')}: checkRadioInterval not set: {e}")
+                    if data_mode is not None:
+                        dm_set = False
+                        dm_errs = []
+                        for setter in (
+                            lambda: cfg.dataMode(int(data_mode)),
+                            lambda: cfg.dataCollectionMethod(int(data_mode)),
+                        ):
+                            try:
+                                setter()
+                                dm_set = True
+                                break
+                            except Exception as e:
+                                dm_errs.append(str(e))
+                        if not dm_set:
+                            log(f"[mscl-web] Write warn node_id={data.get('node_id')}: data_mode not set: {' | '.join(dm_errs)}")
+                        else:
+                            log(
+                                f"[mscl-web] Write data_mode node_id={data.get('node_id')}: "
+                                f"requested={DATA_MODE_LABELS.get(int(data_mode), f'Value {int(data_mode)}')} ({int(data_mode)})"
+                            )
 
                     # Hardware -> temp sensor options (SensorConnect-style best effort)
                     if transducer_type is not None or sensor_type is not None or wire_type is not None:

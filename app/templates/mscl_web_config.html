@@ -43,6 +43,35 @@
             width: auto !important;
             flex: 0 0 auto;
         }
+        /* Sampling panel: make controls about 2pt smaller for denser layout */
+        #samplingPanel .form-label { font-size: 0.70rem; margin-bottom: 0.2rem; }
+        #samplingPanel .form-select,
+        #samplingPanel .form-control { font-size: 0.70rem; padding-top: 0.2rem; padding-bottom: 0.2rem; }
+        #samplingPanel .btn { font-size: 0.70rem; padding-top: 0.2rem; padding-bottom: 0.2rem; }
+        #samplingRunStatus { font-size: 0.68rem !important; }
+        #samplingPanel .sampling-run-row {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 0.5rem;
+            align-items: end;
+        }
+        #samplingPanel .sampling-run-row > [class*="col-"] {
+            width: auto;
+            max-width: none;
+            padding-left: 0;
+            padding-right: 0;
+        }
+        #samplingPanel .sampling-value-col,
+        #samplingPanel .sampling-units-col {
+            min-width: 150px;
+        }
+        #samplingPanel .sampling-value-col { min-width: 160px; }
+        #samplingPanel .sampling-units-col { min-width: 160px; }
+        @media (max-width: 991.98px) {
+            #samplingPanel .sampling-run-row {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+        }
     </style>
 </head>
 <body>
@@ -64,6 +93,7 @@
             </div>
         </div>
         <div id="baseStatusPill" class="status-pill status-err-pill mb-3">Disconnected</div>
+        <div id="baseActionStatus" class="small fw-bold mb-2"></div>
 
         <div class="row g-3 align-items-center">
             <div class="col-md-4">
@@ -74,13 +104,61 @@
             </div>
             <div class="col-md-8 d-flex gap-2 node-actions">
                 <button id="btnRead" onclick="readConfig()" class="btn btn-success fw-bold" disabled>READ</button>
-                <button id="btnSampling" onclick="setNodeSampling()" class="btn btn-outline-success fw-bold">Sampling</button>
+                <button id="btnSampling" onclick="toggleSamplingPanel()" class="btn btn-outline-success fw-bold">Sampling Run</button>
                 <button id="btnSetIdle" onclick="setNodeIdle()" class="btn btn-outline-primary fw-bold">Set to Idle</button>
                 <button id="btnSleep" onclick="setNodeSleep()" class="btn btn-outline-dark fw-bold">Sleep</button>
                 <button id="btnCyclePower" onclick="cycleNodePower()" class="btn btn-outline-primary fw-bold">Power Cycle</button>
                 <button id="btnClearStorage" onclick="clearStorage()" class="btn btn-outline-danger fw-bold" disabled>Clear Storage</button>
                 <button id="btnProbe" onclick="probeNode()" class="btn btn-outline-secondary fw-bold">🛰️ PROBE</button>
             </div>
+        </div>
+        <div id="samplingPanel" class="border rounded p-3 mt-3 bg-light" style="display:none;">
+            <div class="fw-bold text-primary mb-2">Sampling Network</div>
+            <div class="row g-2 align-items-end sampling-run-row">
+                <div class="col-md-2">
+                    <label class="form-label fw-bold">Sample Rate</label>
+                    <select id="samplingRunRate" class="form-select"></select>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label fw-bold">Log/Transmit</label>
+                    <select id="samplingRunMode" class="form-select">
+                        <option value="log">Log</option>
+                        <option value="transmit" selected>Transmit</option>
+                        <option value="log_and_transmit">Log and Transmit</option>
+                    </select>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label fw-bold">Data Type</label>
+                    <select id="samplingRunDataType" class="form-select">
+                        <option value="float" selected>float</option>
+                    </select>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label fw-bold">Mode</label>
+                    <select id="samplingRunWhen" class="form-select" onchange="samplingModeChanged()">
+                        <option value="for" selected>for</option>
+                        <option value="continuous">continuously</option>
+                    </select>
+                </div>
+                <div class="col-md-2 sampling-value-col">
+                    <label class="form-label fw-bold">Value</label>
+                    <input id="samplingRunDurationValue" type="number" min="1" value="60" class="form-control">
+                </div>
+                <div class="col-md-2 sampling-units-col">
+                    <label class="form-label fw-bold">Units</label>
+                    <select id="samplingRunDurationUnits" class="form-select">
+                        <option value="seconds" selected>seconds</option>
+                        <option value="minutes">minutes</option>
+                        <option value="hours">hours</option>
+                    </select>
+                </div>
+            </div>
+            <div class="d-flex gap-2 mt-3">
+                <button id="btnSamplingStart" onclick="startSamplingRun()" class="btn btn-success btn-sm fw-bold">Apply & Start</button>
+                <button id="btnSamplingStop" onclick="stopSamplingRun()" class="btn btn-outline-warning btn-sm fw-bold">Stop Sampling</button>
+                <button id="btnSamplingStatus" onclick="refreshSamplingRunStatus()" class="btn btn-outline-secondary btn-sm fw-bold">Status</button>
+            </div>
+            <div id="samplingRunStatus" class="small text-muted mt-2"></div>
         </div>
         <div id="readStatus" class="mt-2 text-center fw-bold small"></div>
     </div>
@@ -94,19 +172,19 @@
             <div class="border rounded p-3 mb-3 bg-light">
                 <div class="fw-bold text-primary mb-3">Hardware</div>
                 <div class="row mb-3">
-                    <div class="col-md-4">
+                    <div class="col-md-4" id="transducerTypeWrap">
                         <label class="form-label fw-bold">Transducer Type</label>
                         <select id="transducerType" class="form-select">
                             <option value="">N/A</option>
                         </select>
                     </div>
-                    <div class="col-md-4">
+                    <div class="col-md-4" id="sensorTypeWrap">
                         <label class="form-label fw-bold">Sensor Type</label>
                         <select id="sensorType" class="form-select">
                             <option value="">N/A</option>
                         </select>
                     </div>
-                    <div class="col-md-4">
+                    <div class="col-md-4" id="wireTypeWrap">
                         <label class="form-label fw-bold">Wire Type</label>
                         <select id="wireType" class="form-select">
                             <option value="">N/A</option>
@@ -114,13 +192,13 @@
                     </div>
                 </div>
                 <div class="row mb-3">
-                    <div class="col-md-6">
+                    <div class="col-md-6" id="inputRangeWrap">
                         <label class="form-label fw-bold">Input Range</label>
                         <select id="inputRange" class="form-select">
                             <option value="">N/A</option>
                         </select>
                     </div>
-                    <div class="col-md-6">
+                    <div class="col-md-6" id="lowPassFilterWrap">
                         <label class="form-label fw-bold">Low Pass Filter</label>
                         <select id="lowPassFilter" class="form-select">
                             <option value="">N/A</option>
@@ -134,14 +212,14 @@
             <div class="border rounded p-3 mb-3 bg-light">
                 <div class="fw-bold text-primary mb-2">Calibration</div>
                 <div class="row">
-                    <div class="col-md-6">
+                    <div class="col-md-6" id="calibrationUnitWrap">
                         <label class="form-label fw-bold">Unit (Raw Data ch1)</label>
                         <select id="calibrationUnit" class="form-select" disabled>
                             <option value="">N/A</option>
                         </select>
                         <div class="small text-muted mt-1">Editable when options are available</div>
                     </div>
-                    <div class="col-md-6">
+                    <div class="col-md-6" id="cjcCalibrationUnitWrap">
                         <label class="form-label fw-bold">CJC Temperature Unit (ch2)</label>
                         <select id="cjcCalibrationUnit" class="form-select" disabled>
                             <option value="">N/A</option>
@@ -158,7 +236,15 @@
                         <label class="form-label fw-bold">Sample Rate</label>
                         <select id="sampleRate" class="form-select"></select>
                     </div>
-                    <div class="col-md-6">
+                    <div class="col-md-6" id="dataModeWrap">
+                        <label class="form-label fw-bold">Data Mode</label>
+                        <select id="dataMode" class="form-select">
+                            <option value="">N/A</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="row mb-3">
+                    <div class="col-md-6" id="storageLimitModeWrap">
                         <label class="form-label fw-bold">Storage Limit Mode</label>
                         <select id="storageLimitMode" class="form-select">
                             <option value="">N/A</option>
@@ -248,6 +334,7 @@
     const LAST_COMM_WARN_SEC = 30;
     const LAST_COMM_CRITICAL_SEC = 120;
     let idleConfirmed = false;
+    let writeCaps = {};
     let currentRtdSensorOptions = [];
     let currentThermistorSensorOptions = [];
     let currentThermocoupleSensorOptions = [];
@@ -325,13 +412,13 @@
                 res = await fetch('/api/reconnect', {method:'POST'});
                 data = await res.json();
             }
-            const statusDiv = document.getElementById('readStatus');
+            const statusDiv = document.getElementById('baseActionStatus');
             if (data.success) {
-                statusDiv.className = "mt-2 text-center status-ok";
+                statusDiv.className = "small fw-bold status-ok mb-2";
                 statusDiv.innerHTML = "✅ Base connected";
                 markIdleState(false);
             } else {
-                statusDiv.className = "mt-2 text-center status-err";
+                statusDiv.className = "small fw-bold status-err mb-2";
                 statusDiv.innerHTML = `❌ Base connect failed: ${data.message || data.error || 'Unknown error'}`;
                 markIdleState(false);
             }
@@ -456,6 +543,26 @@
                         smSel.add(opt);
                     });
                 }
+                const dmSelSampling = document.getElementById('dataMode');
+                dmSelSampling.innerHTML = "";
+                const dmOptionsSampling = Array.isArray(data.data_mode_options) ? data.data_mode_options : [];
+                if (!dmOptionsSampling.length) {
+                    const opt = document.createElement('option');
+                    opt.value = "";
+                    opt.text = "N/A";
+                    opt.selected = true;
+                    dmSelSampling.add(opt);
+                    dmSelSampling.disabled = true;
+                } else {
+                    dmSelSampling.disabled = false;
+                    dmOptionsSampling.forEach(r => {
+                        const opt = document.createElement('option');
+                        opt.value = r.value;
+                        opt.text = r.label || `Value ${r.value}`;
+                        if (String(r.value) === String(data.current_data_mode)) opt.selected = true;
+                        dmSelSampling.add(opt);
+                    });
+                }
                 document.getElementById('lostBeaconTimeout').value = (data.current_lost_beacon_timeout ?? 2);
                 document.getElementById('diagnosticInterval').value = (data.current_diagnostic_interval ?? 60);
                 const lostBeaconEnabled = !!data.current_lost_beacon_enabled;
@@ -469,6 +576,25 @@
                 const supportsCheckRadioInterval = !!data.supports_check_radio_interval;
                 const supportsTransducerType = !!data.supports_transducer_type;
                 const supportsTempSensorOptions = !!data.supports_temp_sensor_options;
+                const supportsInputRange = inputRanges.length > 0;
+                const supportsLowPassFilter = lpOptions.length > 0;
+                const supportsStorageLimitMode = smOptions.length > 0;
+                const supportsDataMode = dmOptionsSampling.length > 0;
+                const supportsCalibrationUnit = unitOptions.length > 0;
+                const supportsCjcUnit = cjcUnitOptions.length > 0;
+                writeCaps = {
+                    supportsDefaultMode,
+                    supportsInactivityTimeout,
+                    supportsCheckRadioInterval,
+                    supportsTransducerType,
+                    supportsTempSensorOptions,
+                    supportsInputRange,
+                    supportsLowPassFilter,
+                    supportsStorageLimitMode,
+                    supportsDataMode,
+                    supportsCalibrationUnit,
+                    supportsCjcUnit
+                };
                 const trSel = document.getElementById('transducerType');
                 trSel.innerHTML = "";
                 const trOptions = Array.isArray(data.transducer_options) ? data.transducer_options : [];
@@ -489,6 +615,15 @@
                 }
                 trSel.disabled = !supportsTransducerType;
                 trSel.onchange = renderHardwareDependentOptions;
+                document.getElementById('transducerTypeWrap').style.display = supportsTransducerType ? "" : "none";
+                document.getElementById('sensorTypeWrap').style.display = supportsTempSensorOptions ? "" : "none";
+                document.getElementById('wireTypeWrap').style.display = supportsTempSensorOptions ? "" : "none";
+                document.getElementById('inputRangeWrap').style.display = supportsInputRange ? "" : "none";
+                document.getElementById('lowPassFilterWrap').style.display = supportsLowPassFilter ? "" : "none";
+                document.getElementById('calibrationUnitWrap').style.display = supportsCalibrationUnit ? "" : "none";
+                document.getElementById('cjcCalibrationUnitWrap').style.display = supportsCjcUnit ? "" : "none";
+                document.getElementById('dataModeWrap').style.display = supportsDataMode ? "" : "none";
+                document.getElementById('storageLimitModeWrap').style.display = supportsStorageLimitMode ? "" : "none";
 
                 currentRtdSensorOptions = Array.isArray(data.rtd_sensor_options) ? data.rtd_sensor_options : [];
                 currentThermistorSensorOptions = Array.isArray(data.thermistor_sensor_options) ? data.thermistor_sensor_options : [];
@@ -517,7 +652,7 @@
                         dmSel.add(opt);
                     });
                 } else {
-                    dmWrap.style.display = "";
+                    dmWrap.style.display = "none";
                     dmSel.disabled = true;
                     const opt = document.createElement('option');
                     opt.value = "";
@@ -536,7 +671,7 @@
                     document.getElementById('inactivityEnabled').checked = inactivityEnabled;
                     itInput.disabled = !inactivityEnabled;
                 } else {
-                    itWrap.style.display = "";
+                    itWrap.style.display = "none";
                     itInput.disabled = true;
                     itInput.value = "";
                     document.getElementById('inactivityEnabled').checked = false;
@@ -549,7 +684,7 @@
                     criInput.disabled = false;
                     criInput.value = (data.current_check_radio_interval ?? 5);
                 } else {
-                    criWrap.style.display = "";
+                    criWrap.style.display = "none";
                     criInput.disabled = true;
                     criInput.value = "";
                 }
@@ -589,7 +724,9 @@
                     inputRangeActual ? `Input Range: ${inputRangeActual}` : null,
                     activeChannelsText ? `Active Channels: ${activeChannelsText}` : null,
                     data.sampling_mode ? `Sampling: ${data.sampling_mode}` : null,
-                    (data.data_mode && String(data.data_mode) !== "1") ? `Data Mode: ${data.data_mode}` : null,
+                    (data.current_data_mode !== null && data.current_data_mode !== undefined)
+                        ? `Data Mode: ${data.data_mode_text || ('Value ' + data.current_data_mode)} (${data.current_data_mode})`
+                        : null,
                     (data.storage_capacity_raw !== null && data.storage_capacity_raw !== undefined)
                         ? `Storage Capacity: ${formatStorageCapacity(data.storage_capacity_raw)}`
                         : null,
@@ -619,6 +756,7 @@
                     if(r.enum_val == data.current_rate) opt.selected = true;
                     sel.add(opt);
                 });
+                syncSamplingRunRateOptions();
 
                 const chArea = document.getElementById('channelsArea');
                 chArea.innerHTML = "";
@@ -753,36 +891,151 @@
         }
     }
 
-    async function setNodeSampling() {
+    function toggleSamplingPanel() {
+        const panel = document.getElementById('samplingPanel');
+        panel.style.display = panel.style.display === 'none' ? '' : 'none';
+        if (panel.style.display !== 'none') {
+            syncSamplingRunRateOptions();
+            refreshSamplingRunStatus();
+        }
+    }
+
+    function samplingModeChanged() {
+        const when = document.getElementById('samplingRunWhen').value;
+        const valueEl = document.getElementById('samplingRunDurationValue');
+        const unitsEl = document.getElementById('samplingRunDurationUnits');
+        const isContinuous = when === 'continuous';
+        valueEl.disabled = isContinuous;
+        unitsEl.disabled = isContinuous;
+    }
+
+    function syncSamplingRunRateOptions() {
+        const main = document.getElementById('sampleRate');
+        const run = document.getElementById('samplingRunRate');
+        if (!main || !run) return;
+        const oldValue = run.value;
+        run.innerHTML = '';
+        Array.from(main.options).forEach(opt => {
+            if (!opt.value) return;
+            const n = document.createElement('option');
+            n.value = opt.value;
+            n.text = opt.text;
+            if (String(opt.value) === String(main.value)) n.selected = true;
+            run.add(n);
+        });
+        if (oldValue && Array.from(run.options).some(o => String(o.value) === String(oldValue))) {
+            run.value = oldValue;
+        }
+        if (!run.options.length) {
+            const n = document.createElement('option');
+            n.value = '';
+            n.text = 'N/A';
+            run.add(n);
+            run.disabled = true;
+        } else {
+            run.disabled = false;
+        }
+    }
+
+    async function startSamplingRun() {
         const id = document.getElementById('nodeId').value;
-        const statusDiv = document.getElementById('readStatus');
-        const btn = document.getElementById('btnSampling');
-        const raw = prompt("Sampling duration in seconds (0 = no auto-stop):", "60");
-        if (raw === null) return;
-        const duration = Math.max(0, parseInt(raw || "0", 10) || 0);
+        const statusDiv = document.getElementById('samplingRunStatus');
+        const btn = document.getElementById('btnSamplingStart');
+        const rateRaw = document.getElementById('samplingRunRate').value;
+        const when = document.getElementById('samplingRunWhen').value;
+        const durationValueRaw = document.getElementById('samplingRunDurationValue').value;
+        const durationUnits = document.getElementById('samplingRunDurationUnits').value;
+        const mode = document.getElementById('samplingRunMode').value;
+        const dataType = document.getElementById('samplingRunDataType').value || 'float';
+
+        if (!rateRaw) {
+            statusDiv.className = "small status-err mt-2";
+            statusDiv.innerText = "Sample Rate is not available. Read node first.";
+            return;
+        }
+        const body = {
+            sample_rate: parseInt(rateRaw, 10),
+            log_transmit_mode: mode,
+            data_type: dataType,
+            continuous: when === 'continuous',
+            duration_value: when === 'continuous' ? 0 : (parseFloat(durationValueRaw || '0') || 0),
+            duration_units: durationUnits
+        };
+
         btn.disabled = true;
         try {
-            statusDiv.className = "mt-2 text-center text-primary";
-            statusDiv.innerHTML = "⏳ Sending Sampling command...";
-            const res = await fetch(`/api/node_sampling/${id}`, {
-                method:'POST',
+            statusDiv.className = "small text-primary mt-2";
+            statusDiv.innerText = "Starting sampling...";
+            const res = await fetch(`/api/sampling/start/${id}`, {
+                method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({duration_sec: duration})
+                body: JSON.stringify(body)
             });
             const data = await res.json();
             if (data.success) {
-                statusDiv.className = "mt-2 text-center status-ok";
-                statusDiv.innerHTML = `✅ ${data.message}; duration=${data.duration_sec}s`;
+                const run = data.run || {};
+                statusDiv.className = "small status-ok mt-2";
+                statusDiv.innerText = `RUNNING | ${run.mode_label || mode} | ${run.continuous ? 'continuous' : ((run.duration_sec || 0) + 's')}`;
                 markIdleState(false);
             } else {
-                statusDiv.className = "mt-2 text-center status-err";
-                statusDiv.innerHTML = `❌ ${data.error || 'Sampling failed'}`;
+                statusDiv.className = "small status-err mt-2";
+                statusDiv.innerText = `Start failed: ${data.error || 'unknown error'}`;
             }
         } catch (e) {
-            statusDiv.className = "mt-2 text-center status-err";
-            statusDiv.innerHTML = "❌ Sampling failed";
+            statusDiv.className = "small status-err mt-2";
+            statusDiv.innerText = "Start failed";
         } finally {
             btn.disabled = false;
+            refreshSamplingRunStatus();
+        }
+    }
+
+    async function stopSamplingRun() {
+        const id = document.getElementById('nodeId').value;
+        const statusDiv = document.getElementById('samplingRunStatus');
+        const btn = document.getElementById('btnSamplingStop');
+        btn.disabled = true;
+        try {
+            statusDiv.className = "small text-primary mt-2";
+            statusDiv.innerText = "Stopping sampling...";
+            const res = await fetch(`/api/sampling/stop/${id}`, {method:'POST'});
+            const data = await res.json();
+            if (data.success) {
+                statusDiv.className = "small status-ok mt-2";
+                statusDiv.innerText = data.message || "Stop command sent";
+                if ((data.idle_status || {}).state_confirmed === true) markIdleState(true);
+            } else {
+                statusDiv.className = "small status-err mt-2";
+                statusDiv.innerText = `Stop failed: ${data.error || 'unknown error'}`;
+            }
+        } catch (e) {
+            statusDiv.className = "small status-err mt-2";
+            statusDiv.innerText = "Stop failed";
+        } finally {
+            btn.disabled = false;
+            refreshSamplingRunStatus();
+        }
+    }
+
+    async function refreshSamplingRunStatus() {
+        const id = document.getElementById('nodeId').value;
+        const statusDiv = document.getElementById('samplingRunStatus');
+        try {
+            const res = await fetch(`/api/sampling/status/${id}`);
+            const data = await res.json();
+            if (!data.success) return;
+            const run = data.run || {};
+            const mode = run.mode_label || "-";
+            const runState = run.state || "idle";
+            const left = (data.time_left_sec !== null && data.time_left_sec !== undefined)
+                ? ` | left ${data.time_left_sec}s`
+                : "";
+            const nodeState = data.node_state ? ` | node ${data.node_state}` : "";
+            const linkState = data.link_state ? ` | link ${data.link_state}` : "";
+            statusDiv.className = "small text-muted mt-2";
+            statusDiv.innerText = `State ${runState} | mode ${mode}${left}${nodeState}${linkState}`;
+        } catch (e) {
+            // silent
         }
     }
 
@@ -884,6 +1137,7 @@
         const inactivityTimeoutRaw = document.getElementById('inactivityTimeout').value;
         const inactivityEnabled = document.getElementById('inactivityEnabled').checked;
         const checkRadioIntervalRaw = document.getElementById('checkRadioInterval').value;
+        const dataModeRaw = document.getElementById('dataMode').value;
         const transducerTypeRaw = document.getElementById('transducerType').value;
         const sensorTypeRaw = document.getElementById('sensorType').value;
         const wireTypeRaw = document.getElementById('wireType').value;
@@ -917,31 +1171,38 @@
         statusDiv.className = "mt-3 text-center text-primary";
         statusDiv.innerHTML = "⏳ Writing config...";
         try {
+            const payload = {
+                node_id: id,
+                sample_rate: parseInt(rate),
+                tx_power: parseInt(power),
+                channels: activeChs
+            };
+            if (writeCaps.supportsInputRange) payload.input_range = inputRangeRaw === "" ? null : parseInt(inputRangeRaw);
+            if (writeCaps.supportsCalibrationUnit) payload.unit = unitRaw === "" ? null : parseInt(unitRaw);
+            if (writeCaps.supportsCjcUnit) payload.cjc_unit = cjcUnitRaw === "" ? null : parseInt(cjcUnitRaw);
+            if (writeCaps.supportsLowPassFilter) payload.low_pass_filter = lowPassFilterRaw === "" ? null : parseInt(lowPassFilterRaw);
+            if (writeCaps.supportsStorageLimitMode) payload.storage_limit_mode = storageLimitModeRaw === "" ? null : parseInt(storageLimitModeRaw);
+            payload.lost_beacon_timeout = lostBeaconTimeoutRaw === "" ? null : parseInt(lostBeaconTimeoutRaw);
+            payload.diagnostic_interval = diagnosticIntervalRaw === "" ? null : parseInt(diagnosticIntervalRaw);
+            payload.lost_beacon_enabled = !!lostBeaconEnabled;
+            payload.diagnostic_enabled = !!diagnosticEnabled;
+            if (writeCaps.supportsDefaultMode) payload.default_mode = defaultModeRaw === "" ? null : parseInt(defaultModeRaw);
+            if (writeCaps.supportsInactivityTimeout) {
+                payload.inactivity_timeout = inactivityTimeoutRaw === "" ? null : parseInt(inactivityTimeoutRaw);
+                payload.inactivity_enabled = !!inactivityEnabled;
+            }
+            if (writeCaps.supportsCheckRadioInterval) payload.check_radio_interval = checkRadioIntervalRaw === "" ? null : parseInt(checkRadioIntervalRaw);
+            if (writeCaps.supportsDataMode) payload.data_mode = dataModeRaw === "" ? null : parseInt(dataModeRaw);
+            if (writeCaps.supportsTransducerType) payload.transducer_type = transducerTypeRaw === "" ? null : parseInt(transducerTypeRaw);
+            if (writeCaps.supportsTempSensorOptions) {
+                payload.sensor_type = sensorTypeRaw === "" ? null : parseInt(sensorTypeRaw);
+                payload.wire_type = wireTypeRaw === "" ? null : parseInt(wireTypeRaw);
+            }
+
             const res = await fetch('/api/write', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    node_id: id,
-                    sample_rate: parseInt(rate),
-                    tx_power: parseInt(power),
-                    channels: activeChs,
-                    input_range: inputRangeRaw === "" ? null : parseInt(inputRangeRaw),
-                    unit: unitRaw === "" ? null : parseInt(unitRaw),
-                    cjc_unit: cjcUnitRaw === "" ? null : parseInt(cjcUnitRaw),
-                    low_pass_filter: lowPassFilterRaw === "" ? null : parseInt(lowPassFilterRaw),
-                    storage_limit_mode: storageLimitModeRaw === "" ? null : parseInt(storageLimitModeRaw),
-                    lost_beacon_timeout: lostBeaconTimeoutRaw === "" ? null : parseInt(lostBeaconTimeoutRaw),
-                    diagnostic_interval: diagnosticIntervalRaw === "" ? null : parseInt(diagnosticIntervalRaw),
-                    lost_beacon_enabled: !!lostBeaconEnabled,
-                    diagnostic_enabled: !!diagnosticEnabled,
-                    default_mode: defaultModeRaw === "" ? null : parseInt(defaultModeRaw),
-                    inactivity_timeout: inactivityTimeoutRaw === "" ? null : parseInt(inactivityTimeoutRaw),
-                    inactivity_enabled: !!inactivityEnabled,
-                    check_radio_interval: checkRadioIntervalRaw === "" ? null : parseInt(checkRadioIntervalRaw),
-                    transducer_type: transducerTypeRaw === "" ? null : parseInt(transducerTypeRaw),
-                    sensor_type: sensorTypeRaw === "" ? null : parseInt(sensorTypeRaw),
-                    wire_type: wireTypeRaw === "" ? null : parseInt(wireTypeRaw)
-                })
+                body: JSON.stringify(payload)
             });
             const data = await res.json();
             statusDiv.innerHTML = data.success ? "<span class='status-ok'>✅ УСПЕШНО СОХРАНЕНО</span>" : `<span class='status-err'>❌ ${data.error}</span>`;
@@ -1073,7 +1334,12 @@
                 target.innerText = "Diagnostics: " + data.error;
                 return;
             }
-            const parts = data.flags.map(f => `${f.name}: <span class='fw-bold'>${f.value ? 'YES' : 'NO'}</span>`);
+            const parts = data.flags.map(f => {
+                if (typeof f.value === 'boolean') {
+                    return `${f.name}: <span class='fw-bold'>${f.value ? 'YES' : 'NO'}</span>`;
+                }
+                return `${f.name}: <span class='fw-bold'>${f.value ?? 'N/A'}</span>`;
+            });
             parts.push("<span class='fst-italic'>Feature flags may be conservative for this firmware/MSCL build.</span>");
             target.innerHTML = parts.join(" | ");
         } catch (e) { }
