@@ -24,8 +24,6 @@ services:
       - INFLUX_TOKEN=${INFLUX_TOKEN}
       - INFLUX_ORG=${INFLUX_ORG}
       - INFLUX_BUCKET=${INFLUX_BUCKET}
-      # ДОБАВЬТЕ ВОТ ЭТУ СТРОКУ:
-      - MSCL_MODE=${MSCL_MODE:-COLLECTOR}
     ports:
       - "5000:5000"  
     volumes:
