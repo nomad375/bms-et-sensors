@@ -1,11 +1,14 @@
 from flask import Flask, render_template_string, request, jsonify # type: ignore
 import logging
+import os
 from pathlib import Path
 import sys
 import glob
 import time
 import threading
 from datetime import datetime, timezone
+from influxdb_client import InfluxDBClient, Point  # type: ignore
+from influxdb_client.client.write_api import SYNCHRONOUS  # type: ignore
 
 TEMPLATE_PATH = Path(__file__).parent / 'templates' / 'mscl_web_config.html'
 
@@ -54,11 +57,44 @@ SAMPLING_MODE_LABELS = {
     "log_and_transmit": "Log and Transmit",
 }
 
+# InfluxDB configuration for MSCL streaming.
+INFLUX_URL = os.getenv("INFLUX_URL", "http://influxdb:8086")
+INFLUX_TOKEN = os.getenv("INFLUX_TOKEN")
+INFLUX_ORG = os.getenv("INFLUX_ORG")
+INFLUX_BUCKET = os.getenv("INFLUX_BUCKET")
+MSCL_MEASUREMENT = os.getenv("MSCL_MEASUREMENT", "mscl_sensors")
+MSCL_STREAM_ENABLED = os.getenv("MSCL_STREAM_ENABLED", "true").lower() == "true"
+MSCL_STREAM_IDLE_SEC = float(os.getenv("MSCL_STREAM_IDLE_SEC", "0.2"))
+
+INFLUX_CLIENT = None
+INFLUX_WRITE_API = None
+STREAM_THREAD = None
+STREAM_STOP = threading.Event()
+SEEN_CHANNELS = set()
+STREAM_DEBUG = os.getenv("MSCL_STREAM_DEBUG", "false").lower() == "true"
+
 def log(msg):
     print(msg, flush=True)
     LOG_BUFFER.append(f"{time.strftime('%H:%M:%S')} {msg}")
     if len(LOG_BUFFER) > LOG_MAX:
         del LOG_BUFFER[0:len(LOG_BUFFER) - LOG_MAX]
+
+def init_influx():
+    """Initialize InfluxDB client if credentials are present."""
+    global INFLUX_CLIENT, INFLUX_WRITE_API
+    if INFLUX_CLIENT and INFLUX_WRITE_API:
+        return True
+    if not all([INFLUX_TOKEN, INFLUX_ORG, INFLUX_BUCKET]):
+        log("[mscl-web] Influx disabled: missing INFLUX_TOKEN/ORG/BUCKET")
+        return False
+    try:
+        INFLUX_CLIENT = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
+        INFLUX_WRITE_API = INFLUX_CLIENT.write_api(write_options=SYNCHRONOUS)
+        log(f"[mscl-web] Influx ready bucket={INFLUX_BUCKET} org={INFLUX_ORG}")
+        return True
+    except Exception as e:
+        log(f"[mscl-web] Influx init failed: {e}")
+        return False
 
 RATE_MAP = {
     106: "1 Hz", 107: "2 Hz", 108: "4 Hz", 109: "8 Hz",
@@ -328,6 +364,119 @@ def ensure_beacon_on():
     except Exception as e:
         log(f"[mscl-web] [BEACON] auto-enable failed: {e}")
 
+def _packet_points(packet):
+    points = []
+    try:
+        node_id = packet.nodeAddress()
+    except Exception:
+        node_id = None
+    try:
+        data_points = packet.data()
+    except Exception:
+        return points
+    for dp in data_points:
+        try:
+            channel = dp.channelName()
+        except Exception:
+            channel = None
+        if not channel:
+            try:
+                channel = f"ch{int(dp.channelId())}"
+            except Exception:
+                channel = "channel"
+        # Extract value with broad fallbacks across numeric representations.
+        val = None
+        for getter in (
+            lambda: dp.as_float(),
+            lambda: dp.as_double(),
+            lambda: dp.as_int32(),
+            lambda: dp.as_uint32(),
+            lambda: dp.as_int16(),
+            lambda: dp.as_uint16(),
+            lambda: dp.as_int8(),
+            lambda: dp.as_uint8(),
+            lambda: dp.value(),
+        ):
+            try:
+                v = getter()
+                val = float(v)
+                break
+            except Exception:
+                continue
+        if val is None:
+            continue
+        p = Point(MSCL_MEASUREMENT)
+        if node_id is not None:
+            p = p.tag("node_id", str(node_id))
+        if channel:
+            p = p.tag("channel", str(channel))
+            if channel not in SEEN_CHANNELS:
+                SEEN_CHANNELS.add(str(channel))
+                if STREAM_DEBUG:
+                    ch_id = None
+                    dp_type = None
+                    try:
+                        ch_id = dp.channelId()
+                    except Exception:
+                        pass
+                    try:
+                        dp_type = dp.storedAs()
+                    except Exception:
+                        pass
+                    log(f"[mscl-web] [STREAM] first seen channel={channel} id={ch_id} type={dp_type} node={node_id}")
+        points.append(p.field("value", val))
+    return points
+
+def _stream_data_loop():
+    if not init_influx():
+        log("[mscl-web] Streaming not started: Influx init failed")
+        return
+    log("[mscl-web] Streaming thread started")
+    global BASE_STATION, LAST_PING_OK_TS
+    while not STREAM_STOP.is_set():
+        try:
+            with OP_LOCK:
+                ok, msg = internal_connect()
+                if not ok or BASE_STATION is None:
+                    log(f"[mscl-web] Stream connect failed: {msg}")
+                    time.sleep(1.0)
+                    continue
+                ensure_beacon_on()
+                packets = BASE_STATION.getData(500)
+        except Exception as e:
+            log(f"[mscl-web] Stream transport error: {e}")
+            BASE_STATION = None
+            LAST_PING_OK_TS = 0
+            time.sleep(1.0)
+            continue
+
+        if not packets:
+            time.sleep(MSCL_STREAM_IDLE_SEC)
+            continue
+
+        points = []
+        for pkt in packets:
+            points.extend(_packet_points(pkt))
+
+        if points:
+            try:
+                INFLUX_WRITE_API.write(INFLUX_BUCKET, INFLUX_ORG, points)
+            except Exception as e:
+                log(f"[mscl-web] Influx write failed: {e}")
+                time.sleep(0.5)
+
+def ensure_stream_thread():
+    global STREAM_THREAD
+    if not MSCL_STREAM_ENABLED:
+        log("[mscl-web] Streaming disabled by MSCL_STREAM_ENABLED")
+        return
+    if STREAM_THREAD and STREAM_THREAD.is_alive():
+        return
+    if not init_influx():
+        return
+    STREAM_THREAD = threading.Thread(target=_stream_data_loop, name="mscl-stream", daemon=True)
+    STREAM_THREAD.start()
+
 def ch1_mask():
     mask = mscl.ChannelMask()
     mask.enable(1)
@@ -476,15 +625,22 @@ def send_idle_sensorconnect_style(node, node_id, stage_tag):
     }
 
 def _start_sampling_best_effort(node, node_id):
-    """Try sync-first sampling start, then fallback to non-sync start."""
+    """Try primary sync start, then sync-resend, then non-sync fallback."""
     errors = []
+    try:
+        if callable(getattr(node, "startSyncSampling", None)):
+            node.startSyncSampling()
+            log(f"[mscl-web] [SAMPLE] startSyncSampling sent node_id={node_id}")
+            return "sync"
+    except Exception as e:
+        errors.append(f"startSync={e}")
     try:
         if callable(getattr(node, "resendStartSyncSampling", None)):
             node.resendStartSyncSampling()
             log(f"[mscl-web] [SAMPLE] resendStartSyncSampling sent node_id={node_id}")
-            return "sync"
+            return "sync-resend"
     except Exception as e:
-        errors.append(f"sync={e}")
+        errors.append(f"resendSync={e}")
     try:
         if callable(getattr(node, "startNonSyncSampling", None)):
             node.startNonSyncSampling()
@@ -2225,6 +2381,7 @@ def api_write():
     return jsonify(success=False, error=last_err or "Write failed")
 
 def run_config_server():
+    ensure_stream_thread()
     app.run(host='0.0.0.0', port=5000)
 
 
