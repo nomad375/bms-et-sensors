@@ -1,4 +1,5 @@
 from flask import Flask, render_template_string, request, jsonify # type: ignore
+import fcntl
 import logging
 import os
 from pathlib import Path
@@ -25,7 +26,43 @@ app = Flask(__name__)
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 CONNECT_LOCK = threading.Lock()
-OP_LOCK = threading.Lock()
+INTERPROCESS_LOCK_PATH = os.getenv("MSCL_LOCK_FILE", "/var/lock/mscl/base.lock")
+
+
+class SharedOpLock:
+    """Thread + process lock to serialize BaseStation access across containers."""
+
+    def __init__(self, lock_path):
+        self._lock_path = lock_path
+        self._thread_lock = threading.RLock()
+        self._tls = threading.local()
+
+    def __enter__(self):
+        self._thread_lock.acquire()
+        depth = getattr(self._tls, "depth", 0)
+        if depth == 0:
+            lock_dir = os.path.dirname(self._lock_path)
+            if lock_dir:
+                os.makedirs(lock_dir, exist_ok=True)
+            fh = open(self._lock_path, "a+")
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            self._tls.fh = fh
+        self._tls.depth = depth + 1
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        depth = getattr(self._tls, "depth", 1) - 1
+        self._tls.depth = depth
+        if depth == 0:
+            fh = getattr(self._tls, "fh", None)
+            if fh is not None:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                fh.close()
+                self._tls.fh = None
+        self._thread_lock.release()
+
+
+OP_LOCK = SharedOpLock(INTERPROCESS_LOCK_PATH)
 
 # Глобальные переменные
 BASE_STATION = None
@@ -63,7 +100,7 @@ INFLUX_TOKEN = os.getenv("INFLUX_TOKEN")
 INFLUX_ORG = os.getenv("INFLUX_ORG")
 INFLUX_BUCKET = os.getenv("INFLUX_BUCKET")
 MSCL_MEASUREMENT = os.getenv("MSCL_MEASUREMENT", "mscl_sensors")
-MSCL_STREAM_ENABLED = os.getenv("MSCL_STREAM_ENABLED", "true").lower() == "true"
+MSCL_STREAM_ENABLED = os.getenv("MSCL_STREAM_ENABLED", "false").lower() == "true"
 MSCL_STREAM_IDLE_SEC = float(os.getenv("MSCL_STREAM_IDLE_SEC", "0.2"))
 
 INFLUX_CLIENT = None
@@ -2381,7 +2418,6 @@ def api_write():
     return jsonify(success=False, error=last_err or "Write failed")
 
 def run_config_server():
-    ensure_stream_thread()
     app.run(host='0.0.0.0', port=5000)
 
 

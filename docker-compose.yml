@@ -24,10 +24,34 @@ services:
       - INFLUX_TOKEN=${INFLUX_TOKEN}
       - INFLUX_ORG=${INFLUX_ORG}
       - INFLUX_BUCKET=${INFLUX_BUCKET}
+      - MSCL_LOCK_FILE=/var/lock/mscl/base.lock
     ports:
       - "5000:5000"  
     volumes:
       - /dev:/dev
+      - mscl_lock:/var/lock/mscl
+    env_file: .env
+    depends_on:
+      influxdb:
+        condition: service_healthy
+
+  mscl-stream:
+    image: nomad375/mscl-daq:latest
+    container_name: mscl-stream
+    privileged: true
+    restart: always
+    command: ["python", "mscl_main.py"]
+    environment:
+      - INFLUX_URL=${INFLUX_URL}
+      - INFLUX_TOKEN=${INFLUX_TOKEN}
+      - INFLUX_ORG=${INFLUX_ORG}
+      - INFLUX_BUCKET=${INFLUX_BUCKET}
+      - MSCL_MEASUREMENT=mscl_sensors
+      - MSCL_ONLY_CHANNEL_1=false
+      - MSCL_LOCK_FILE=/var/lock/mscl/base.lock
+    volumes:
+      - /dev:/dev
+      - mscl_lock:/var/lock/mscl
     env_file: .env
     depends_on:
       influxdb:
@@ -73,3 +97,4 @@ services:
 volumes:
   influxdb_data:
   grafana_data:
+  mscl_lock:

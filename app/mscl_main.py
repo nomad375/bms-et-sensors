@@ -1,4 +1,5 @@
 import glob
+import fcntl
 import os
 import sys
 import time
@@ -24,6 +25,27 @@ BUCKET = os.getenv("INFLUX_BUCKET")
 MEASUREMENT = os.getenv("MSCL_MEASUREMENT", "mscl_sensors")
 BAUDRATE = int(os.getenv("MSCL_BAUDRATE", "3000000"))
 ONLY_CHANNEL_1 = os.getenv("MSCL_ONLY_CHANNEL_1", "false").lower() == "true"
+LOCK_FILE = os.getenv("MSCL_LOCK_FILE", "/var/lock/mscl/base.lock")
+
+
+class BaseAccessLock:
+    def __init__(self, lock_file):
+        self.lock_file = lock_file
+        self.fh = None
+
+    def __enter__(self):
+        lock_dir = os.path.dirname(self.lock_file)
+        if lock_dir:
+            os.makedirs(lock_dir, exist_ok=True)
+        self.fh = open(self.lock_file, "a+")
+        fcntl.flock(self.fh.fileno(), fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.fh is not None:
+            fcntl.flock(self.fh.fileno(), fcntl.LOCK_UN)
+            self.fh.close()
+            self.fh = None
 
 
 def find_base_station():
@@ -31,12 +53,13 @@ def find_base_station():
     ports = glob.glob("/dev/ttyACM*") + glob.glob("/dev/ttyUSB*")
     for port in ports:
         try:
-            connection = mscl.Connection.Serial(port, BAUDRATE)
-            base_station = mscl.BaseStation(connection)
-            base_station.readWriteRetries(10)
-            if base_station.ping():
-                print(f">>> Found BaseStation on {port}")
-                return base_station
+            with BaseAccessLock(LOCK_FILE):
+                connection = mscl.Connection.Serial(port, BAUDRATE)
+                base_station = mscl.BaseStation(connection)
+                base_station.readWriteRetries(10)
+                if base_station.ping():
+                    print(f">>> Found BaseStation on {port}")
+                    return base_station
         except Exception:
             continue
     return None
@@ -82,6 +105,7 @@ def main():
     print(f">>> Starting MSCL read-only collector (MSCL {mscl.MSCL_VERSION})")
     print(f">>> Influx target: {URL} bucket={BUCKET} org={ORG} measurement={MEASUREMENT}")
     print(f">>> Filter only channel_1/ch1: {ONLY_CHANNEL_1}")
+    print(f">>> Base access lock: {LOCK_FILE}")
 
     db_client = InfluxDBClient(url=URL, token=TOKEN, org=ORG)
     write_api = db_client.write_api(write_options=SYNCHRONOUS)
@@ -94,7 +118,8 @@ def main():
     print(">>> Listening for node packets...")
     while True:
         try:
-            packets = base_station.getData(500)
+            with BaseAccessLock(LOCK_FILE):
+                packets = base_station.getData(500)
             if not packets:
                 time.sleep(0.1)
                 continue
