@@ -802,6 +802,12 @@ def api_read(node_id):
                         frequency = str(freq_raw)
                 except Exception:
                     frequency = None
+                storage_capacity_raw = cached.get("storage_capacity_raw")
+                if refresh_eeprom or "storage_capacity_raw" not in cached:
+                    try:
+                        storage_capacity_raw = int(node.dataStorageSize())
+                    except Exception:
+                        pass
                 try:
                     storage_pct = round(float(node.percentFull()), 2)
                 except Exception:
@@ -1245,7 +1251,7 @@ def api_read(node_id):
                     success=True, model=model, sn=sn, fw=fw,
                     region=region, last_comm=last_comm, state=state, state_text=state_text,
                     node_address=node_address, frequency=frequency,
-                    storage_pct=storage_pct, sampling_mode=sampling_mode, sampling_mode_raw=sampling_mode_raw, data_mode=data_mode,
+                    storage_pct=storage_pct, storage_capacity_raw=storage_capacity_raw, sampling_mode=sampling_mode, sampling_mode_raw=sampling_mode_raw, data_mode=data_mode,
                     current_input_range=current_input_range, supported_input_ranges=supported_input_ranges,
                     current_unit=current_unit, unit_options=unit_options,
                     current_cjc_unit=current_cjc_unit, cjc_unit_options=cjc_unit_options,
