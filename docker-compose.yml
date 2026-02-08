@@ -20,10 +20,6 @@ services:
     privileged: true
     restart: always
     environment:
-      - INFLUX_URL=${INFLUX_URL}
-      - INFLUX_TOKEN=${INFLUX_TOKEN}
-      - INFLUX_ORG=${INFLUX_ORG}
-      - INFLUX_BUCKET=${INFLUX_BUCKET}
       - MSCL_LOCK_FILE=/var/lock/mscl/base.lock
     ports:
       - "5000:5000"  
