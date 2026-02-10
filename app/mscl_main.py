@@ -59,10 +59,23 @@ def find_base_station():
                 base_station.readWriteRetries(10)
                 if base_station.ping():
                     print(f">>> Found BaseStation on {port}")
-                    return base_station
+                    return base_station, port
         except Exception:
             continue
-    return None
+    return None, None
+
+
+def _close_base_station(base_station):
+    if base_station is None:
+        return
+    try:
+        base_station.disconnect()
+    except Exception:
+        pass
+    try:
+        base_station.release()
+    except Exception:
+        pass
 
 
 def _point_channel(dp):
@@ -110,12 +123,14 @@ def main():
     db_client = InfluxDBClient(url=URL, token=TOKEN, org=ORG)
     write_api = db_client.write_api(write_options=SYNCHRONOUS)
 
-    base_station = find_base_station()
+    base_station, port = find_base_station()
     if not base_station:
         print("!!! No BaseStation found. Ensure it is connected.")
         sys.exit(1)
 
     print(">>> Listening for node packets...")
+    reconnect_backoff = 1.0
+    reconnect_backoff_max = 10.0
     while True:
         try:
             with BaseAccessLock(LOCK_FILE):
@@ -152,7 +167,16 @@ def main():
 
         except Exception as e:
             print(f"!!! Runtime error: {e}")
-            time.sleep(1.0)
+            _close_base_station(base_station)
+            base_station = None
+            while base_station is None:
+                time.sleep(reconnect_backoff)
+                base_station, port = find_base_station()
+                if base_station:
+                    print(f">>> Reconnected BaseStation on {port}")
+                    reconnect_backoff = 1.0
+                    break
+                reconnect_backoff = min(reconnect_backoff_max, reconnect_backoff * 1.7)
 
 
 if __name__ == "__main__":

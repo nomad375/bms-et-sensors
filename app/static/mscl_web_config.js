@@ -14,6 +14,13 @@
         updateReadWriteButtons();
     }
 
+    function updateBaseButtons(connected) {
+        const connectBtn = document.getElementById('btnConnect');
+        const disconnectBtn = document.getElementById('btnDisconnect');
+        if (connectBtn) connectBtn.disabled = connected;
+        if (disconnectBtn) disconnectBtn.disabled = !connected;
+    }
+
     async function connectBase() {
         try {
             let res = await fetch('/api/connect', {method:'POST'});
@@ -34,6 +41,30 @@
             }
             await refreshBaseStatus();
         } catch (e) { }
+        } finally {
+            // allow disconnect button toggle after potential connect
+            updateBaseButtons(window.currentBaseConnected === true);
+        }
+    }
+
+    async function disconnectBase() {
+        const statusDiv = document.getElementById('readStatus');
+        try {
+            const res = await fetch('/api/disconnect', {method: 'POST'});
+            const data = await res.json();
+            if (!data.success) {
+                statusDiv.className = "mt-2 text-center status-err";
+                statusDiv.innerHTML = `❌ ${data.error || 'Disconnect failed'}`;
+            } else {
+                statusDiv.className = "mt-2 text-center status-ok";
+                statusDiv.innerHTML = `✅ ${data.message || 'Disconnected'}`;
+            }
+        } catch (e) {
+            statusDiv.className = "mt-2 text-center status-err";
+            statusDiv.innerHTML = "❌ Disconnect failed";
+        } finally {
+            await refreshBaseStatus();
+        }
     }
 
     async function readConfig() {
@@ -501,6 +532,7 @@
         try {
             const res = await fetch('/api/status');
             const data = await res.json();
+            window.currentBaseConnected = Boolean(data.connected);
             const text = document.getElementById('baseStatusText');
             const pill = document.getElementById('baseStatusPill');
             if (data.connected) {
@@ -549,6 +581,7 @@
                 (data.comm_age_sec !== null && data.comm_age_sec !== undefined) ? `Comm Age: ${data.comm_age_sec}s` : null
             ].filter(Boolean).join(" | ");
             text.innerText = line2 ? `${line1}\n${line2}` : line1;
+            updateBaseButtons(window.currentBaseConnected);
         } catch (e) { }
     }
 
@@ -614,5 +647,7 @@
     }
 
     // Manual refresh only (no auto status refresh)
+    window.currentBaseConnected = false;
+    updateBaseButtons(false);
     updateReadWriteButtons();
     refreshLogs();

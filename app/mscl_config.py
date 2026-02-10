@@ -1,433 +1,266 @@
 from flask import Flask, render_template_string, request, jsonify # type: ignore
-import fcntl
 import logging
 import os
 from pathlib import Path
-import sys
-import glob
 import time
 import threading
+from collections import deque
 from datetime import datetime, timezone
+from influxdb_client import InfluxDBClient, Point  # type: ignore
+from influxdb_client.client.write_api import ASYNCHRONOUS, WriteOptions  # type: ignore
+
+from mscl_constants import (
+    COMM_PROTOCOL_MAP,
+    DATA_MODE_LABELS,
+    DEFAULT_MODE_LABELS,
+    INPUT_RANGE_LABELS,
+    LOW_PASS_LABELS,
+    PRIMARY_INPUT_RANGES,
+    PRIMARY_UNIT_ORDER,
+    RATE_MAP,
+    RTD_SENSOR_LABELS,
+    RTD_WIRE_LABELS,
+    SAMPLING_MODE_LABELS,
+    SAMPLING_MODE_MAP,
+    STORAGE_LIMIT_LABELS,
+    TC_LINK_200_RATE_ENUMS,
+    TEMP_UNIT_ORDER,
+    THERMISTOR_SENSOR_LABELS,
+    THERMOCOUPLE_SENSOR_LABELS,
+    TRANSDUCER_LABELS,
+    TX_POWER_ENUM_TO_DBM,
+    UNIT_LABELS,
+    _is_temp_unit,
+    _unit_family,
+    _wt,
+)
+
+import mscl_state as state
+
+log = state.log
+internal_connect = state.internal_connect
+ensure_beacon_on = state.ensure_beacon_on
+ch1_mask = state.ch1_mask
+ch2_mask = state.ch2_mask
+set_idle_with_retry = state.set_idle_with_retry
+_get_temp_sensor_options = state._get_temp_sensor_options
+_set_temp_sensor_options = state._set_temp_sensor_options
+_filter_default_modes = state._filter_default_modes
+_feature_supported = state._feature_supported
+_node_state_info = state._node_state_info
+close_base_station = state.close_base_station
 
 TEMPLATE_PATH = Path(__file__).parent / 'templates' / 'mscl_web_config.html'
 
-# Подключаем MSCL
-mscl_path = '/usr/lib/python3.12/dist-packages'
-if mscl_path not in sys.path: 
-    sys.path.append(mscl_path)
-
-import MSCL as mscl # type: ignore
+import MSCL as mscl  # type: ignore
 
 app = Flask(__name__)
 
 # Suppress Flask request logs (GET/POST lines)
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
-CONNECT_LOCK = threading.Lock()
-INTERPROCESS_LOCK_PATH = os.getenv("MSCL_LOCK_FILE", "/var/lock/mscl/base.lock")
-
-
-class SharedOpLock:
-    """Thread + process lock to serialize BaseStation access across containers."""
-
-    def __init__(self, lock_path):
-        self._lock_path = lock_path
-        self._thread_lock = threading.RLock()
-        self._tls = threading.local()
-
-    def __enter__(self):
-        self._thread_lock.acquire()
-        depth = getattr(self._tls, "depth", 0)
-        if depth == 0:
-            lock_dir = os.path.dirname(self._lock_path)
-            if lock_dir:
-                os.makedirs(lock_dir, exist_ok=True)
-            fh = open(self._lock_path, "a+")
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-            self._tls.fh = fh
-        self._tls.depth = depth + 1
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        depth = getattr(self._tls, "depth", 1) - 1
-        self._tls.depth = depth
-        if depth == 0:
-            fh = getattr(self._tls, "fh", None)
-            if fh is not None:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-                fh.close()
-                self._tls.fh = None
-        self._thread_lock.release()
-
-
-OP_LOCK = SharedOpLock(INTERPROCESS_LOCK_PATH)
-
-# Глобальные переменные
-BASE_STATION = None
-BAUDRATE = 3000000 
-LOG_BUFFER = []
-LOG_MAX = 200
-LAST_BASE_STATUS = {"connected": False, "port": "N/A", "message": "Not connected", "ts": None}
-LAST_PING_OK_TS = 0
-PING_TTL_SEC = 10
-CONNECT_BACKOFF_SEC = 1.5
-CURRENT_PORT = None
-LAST_CONNECT_ATTEMPT_TS = 0
-CONNECT_MIN_INTERVAL_SEC = 2.0
-NODE_READ_CACHE = {}
-BASE_BEACON_STATE = None
-NODE_FRESH_COMM_SEC = 45
-NODE_ACTIVE_STATE_FRESH_SEC = 8
-SAMPLE_STOP_TOKENS = {}
-SAMPLE_RUNS = {}
-IDLE_IN_PROGRESS = set()
-SAMPLING_MODE_MAP = {
-    "log": 2,
-    "transmit": 1,
-    "log_and_transmit": 3,
-}
-SAMPLING_MODE_LABELS = {
-    "log": "Log",
-    "transmit": "Transmit",
-    "log_and_transmit": "Log and Transmit",
-}
+INFLUX_URL = os.getenv("INFLUX_URL", "http://influxdb:8086")
+INFLUX_TOKEN = os.getenv("INFLUX_TOKEN")
+INFLUX_ORG = os.getenv("INFLUX_ORG")
+INFLUX_BUCKET = os.getenv("INFLUX_BUCKET")
+MSCL_MEASUREMENT = os.getenv("MSCL_MEASUREMENT", "mscl_sensors")
+MSCL_ONLY_CHANNEL_1 = os.getenv("MSCL_ONLY_CHANNEL_1", "false").lower() == "true"
+MSCL_STREAM_ENABLED = os.getenv("MSCL_STREAM_ENABLED", "true").lower() not in ("0", "false", "no")
+MSCL_STREAM_READ_TIMEOUT_MS = int(os.getenv("MSCL_STREAM_READ_TIMEOUT_MS", "20"))
+MSCL_STREAM_IDLE_SLEEP = float(os.getenv("MSCL_STREAM_IDLE_SLEEP", "0.005"))
+MSCL_STREAM_BATCH_SIZE = int(os.getenv("MSCL_STREAM_BATCH_SIZE", "5000"))
+MSCL_STREAM_FLUSH_INTERVAL_MS = int(os.getenv("MSCL_STREAM_FLUSH_INTERVAL_MS", "500"))
+MSCL_STREAM_QUEUE_MAX = int(os.getenv("MSCL_STREAM_QUEUE_MAX", "5000"))
+MSCL_STREAM_QUEUE_WAIT_MS = int(os.getenv("MSCL_STREAM_QUEUE_WAIT_MS", "200"))
+MSCL_STREAM_DROP_WARN_SEC = float(os.getenv("MSCL_STREAM_DROP_WARN_SEC", "30"))
+MSCL_STREAM_DROP_LOG_THROTTLE_SEC = float(os.getenv("MSCL_STREAM_DROP_LOG_THROTTLE_SEC", "30"))
 
 def log(msg):
     print(msg, flush=True)
-    LOG_BUFFER.append(f"{time.strftime('%H:%M:%S')} {msg}")
-    if len(LOG_BUFFER) > LOG_MAX:
-        del LOG_BUFFER[0:len(LOG_BUFFER) - LOG_MAX]
+    state.LOG_BUFFER.append(f"{time.strftime('%H:%M:%S')} {msg}")
+    if len(state.LOG_BUFFER) > state.LOG_MAX:
+        del state.LOG_BUFFER[0:len(state.LOG_BUFFER) - state.LOG_MAX]
 
-RATE_MAP = {
-    106: "1 Hz", 107: "2 Hz", 108: "4 Hz", 109: "8 Hz",
-    110: "16 Hz", 111: "32 Hz", 112: "64 Hz", 113: "128 Hz",
-    114: "256 Hz", 115: "512 Hz", 116: "1 kHz", 117: "2 kHz",
-    118: "4 kHz", 119: "8 kHz", 120: "16 kHz", 121: "32 kHz",
-    122: "64 kHz", 123: "128 kHz"
-}
-TC_LINK_200_RATE_ENUMS = {106, 107, 108, 109, 110, 111, 112, 113}
-COMM_PROTOCOL_MAP = {
-    0: "LXRS",
-    1: "LXRS+",
-}
-TX_POWER_ENUM_TO_DBM = {
-    0: 20,
-    1: 16,
-    2: 10,
-    3: 5,
-    4: 0,
-}
-INPUT_RANGE_LABELS = {
-    99: "+/-1.35 V or 0 to 1 mega-ohms (Gain: 1)",
-    100: "+/-1.25 V or 0 to 10000 ohms (Gain: 2)",
-    101: "+/-625 mV or 0 to 3333.3 ohms (Gain: 4)",
-    102: "+/-312.5 mV or 0 to 1428.6 ohms (Gain: 8)",
-    103: "+/-156.25 mV or 0 to 666.67 ohms (Gain: 16)",
-    0: "+/-14.545 mV",
-    1: "+/-10.236 mV",
-    2: "+/-7.608 mV",
-    3: "+/-4.046 mV",
-    4: "+/-2.008 mV",
-}
-PRIMARY_INPUT_RANGES = {99, 100, 101, 102, 103}
-LOW_PASS_LABELS = {
-    294: "294 Hz",
-    291: "12.66 Hz (92db 50/60 Hz rejection)",
-    289: "2.6 Hz (120db 50/60 Hz rejection)",
-    # Some MSCL builds return compact enum values for the same filters.
-    12: "12.66 Hz (92db 50/60 Hz rejection)",
-    2: "2.6 Hz (120db 50/60 Hz rejection)",
-}
-STORAGE_LIMIT_LABELS = {
-    0: "Overwrite",
-    1: "Stop",
-}
-DEFAULT_MODE_LABELS = {
-    0: "Idle",
-    1: "Low Duty Cycle",
-    5: "Sleep",
-    6: "Sample (Sync)",
-}
-DATA_MODE_LABELS = {
-    1: "Live Radio",
-    2: "Datalog Only",
-    3: "Live Radio + Datalog",
-}
 
-def _wt(name, default=None):
-    return getattr(mscl.WirelessTypes, name, default)
-
-TRANSDUCER_LABELS = {
-    _wt("transducer_thermocouple", 0): "Thermocouple",
-    _wt("transducer_rtd", 1): "RTD",
-    _wt("transducer_thermistor", 2): "Thermistor",
-}
-
-RTD_SENSOR_LABELS = {
-    _wt("rtd_uncompensated", 0): "Uncompensated (Resistance)",
-    _wt("rtd_pt10", 1): "PT10",
-    _wt("rtd_pt50", 2): "PT50",
-    _wt("rtd_pt100", 3): "PT100",
-    _wt("rtd_pt200", 4): "PT200",
-    _wt("rtd_pt500", 5): "PT500",
-    _wt("rtd_pt1000", 6): "PT1000",
-}
-
-THERMISTOR_SENSOR_LABELS = {
-    _wt("thermistor_uncompensated", 0): "Uncompensated",
-    _wt("thermistor_44004_44033", 1): "44004 / 44033",
-    _wt("thermistor_44005_44030", 2): "44005 / 44030",
-    _wt("thermistor_44007_44034", 3): "44007 / 44034",
-    _wt("thermistor_44006_44031", 4): "44006 / 44031",
-    _wt("thermistor_44008_44032", 5): "44008 / 44032",
-    _wt("thermistor_ysi_400", 6): "YSI 400",
-}
-
-THERMOCOUPLE_SENSOR_LABELS = {
-    0: "Type J",
-    1: "Type K",
-    2: "Type T",
-    3: "Type E",
-    4: "Type R",
-    5: "Type S",
-    6: "Type B",
-    7: "Type N",
-}
-
-RTD_WIRE_LABELS = {
-    _wt("rtd_2wire", 0): "2 Wire",
-    _wt("rtd_3wire", 1): "3 Wire",
-    _wt("rtd_4wire", 2): "4 Wire",
-}
-
-def _build_unit_labels():
-    labels = {}
+def _point_channel(dp):
     try:
-        for name in dir(mscl.WirelessTypes):
-            if not name.startswith("unit_"):
-                continue
-            try:
-                val = int(getattr(mscl.WirelessTypes, name))
-            except Exception:
-                continue
-            suffix = name.split("unit_", 1)[1].replace("_", " ").strip().lower()
-            compact = suffix.replace(" ", "")
-            if "milliohm" in compact:
-                label = "Milliohm"
-            elif "kiloohm" in compact:
-                label = "Kiloohm"
-            elif compact.endswith("ohm") or "resistance" in compact:
-                label = "Ohm"
-            else:
-                label = suffix.title() if suffix else f"Value {val}"
-            labels[val] = label
+        name = dp.channelName()
+        if name:
+            return str(name)
     except Exception:
         pass
-    return labels
+    try:
+        return f"ch{int(dp.channelId())}"
+    except Exception:
+        return "channel"
 
-UNIT_LABELS = _build_unit_labels()
-PRIMARY_UNIT_ORDER = ["Ohm", "Milliohm", "Kiloohm"]
-TEMP_UNIT_ORDER = ["Celsius", "Fahrenheit", "Kelvin"]
 
-def _unit_family(label):
-    s = str(label or "").lower().replace(" ", "")
-    if "milliohm" in s:
-        return "Milliohm"
-    if "kiloohm" in s:
-        return "Kiloohm"
-    if "ohm" in s:
-        return "Ohm"
+def _point_value(dp):
+    for getter in (
+        lambda: dp.as_float(),
+        lambda: dp.as_double(),
+        lambda: dp.as_int32(),
+        lambda: dp.as_uint32(),
+        lambda: dp.as_int16(),
+        lambda: dp.as_uint16(),
+        lambda: dp.as_int8(),
+        lambda: dp.as_uint8(),
+        lambda: dp.value(),
+    ):
+        try:
+            return float(getter())
+        except Exception:
+            continue
     return None
 
-def _is_temp_unit(label):
-    s = str(label or "").lower()
-    return ("celsius" in s) or ("fahrenheit" in s) or ("kelvin" in s)
 
-def _get_temp_sensor_options(node):
-    errs = []
-    for getter in (
-        lambda: node.getTempSensorOptions(ch1_mask()),
-        lambda: node.getTempSensorOptions(),
-    ):
-        try:
-            return getter(), None
-        except Exception as e:
-            errs.append(str(e))
-    return None, " | ".join(errs) if errs else "getTempSensorOptions failed"
-
-def _set_temp_sensor_options(cfg, opts):
-    errs = []
-    for setter in (
-        lambda: cfg.tempSensorOptions(ch1_mask(), opts),
-        lambda: cfg.tempSensorOptions(opts),
-    ):
-        try:
-            setter()
-            return True, None
-        except Exception as e:
-            errs.append(str(e))
-    return False, " | ".join(errs) if errs else "tempSensorOptions set failed"
-
-def _filter_default_modes(opts):
-    vals = {int(x.get("value")) for x in opts if x.get("value") is not None}
-    if 4 in vals:
-        opts = [x for x in opts if int(x.get("value")) != 4]
-    return opts
-
-def _feature_supported(features, method_name):
-    try:
-        fn = getattr(features, method_name, None)
-        if callable(fn):
-            return bool(fn())
-    except Exception:
-        pass
-    return False
-
-def find_port():
-    ports = glob.glob('/dev/ttyACM*') + glob.glob('/dev/ttyUSB*')
-    return ports[0] if ports else None
-
-def internal_connect(force_ping=False):
-    global BASE_STATION, LAST_PING_OK_TS, CURRENT_PORT, LAST_CONNECT_ATTEMPT_TS, BASE_BEACON_STATE
-    now = time.time()
-    with CONNECT_LOCK:
-        # If we already have a station object, periodically verify transport health.
-        if BASE_STATION and not force_ping:
-            if (now - LAST_PING_OK_TS) <= PING_TTL_SEC:
-                return True, "Connected"
-            try:
-                if BASE_STATION.ping():
-                    LAST_PING_OK_TS = now
-                    LAST_BASE_STATUS.update({"connected": True, "message": "Connected", "ts": time.strftime("%H:%M:%S")})
-                    return True, "Connected"
-            except Exception as e:
-                LAST_BASE_STATUS.update({
-                    "connected": False,
-                    "port": CURRENT_PORT or "N/A",
-                    "message": f"Runtime ping failed: {e}",
-                    "ts": time.strftime("%H:%M:%S"),
-                })
-                BASE_STATION = None
-        if BASE_STATION and force_ping:
-            try:
-                if BASE_STATION.ping():
-                    LAST_PING_OK_TS = now
-                    LAST_BASE_STATUS.update({"connected": True, "message": "Connected", "ts": time.strftime("%H:%M:%S")})
-                    return True, "Connected"
-            except Exception as e:
-                LAST_BASE_STATUS.update({
-                    "connected": False,
-                    "port": CURRENT_PORT or "N/A",
-                    "message": f"Forced ping failed: {e}",
-                    "ts": time.strftime("%H:%M:%S"),
-                })
-                BASE_STATION = None
-        if (not force_ping) and (now - LAST_CONNECT_ATTEMPT_TS) < CONNECT_MIN_INTERVAL_SEC:
-            return False, "Connect throttled"
-        LAST_CONNECT_ATTEMPT_TS = now
-        port = CURRENT_PORT or find_port()
-        if not port:
-            LAST_BASE_STATUS.update({"connected": False, "port": "N/A", "message": "No Port", "ts": time.strftime("%H:%M:%S")})
-            return False, "No Port"
-        try:
-            log(f"[mscl-web] Connecting BaseStation on {port}...")
-            conn = mscl.Connection.Serial(port, BAUDRATE)
-            station = mscl.BaseStation(conn)
-            station.readWriteRetries(10)
-            if station.ping():
-                BASE_STATION = station
-                BASE_STATION.enableBeacon()
-                BASE_BEACON_STATE = True
-                LAST_PING_OK_TS = now
-                CURRENT_PORT = port
-                LAST_BASE_STATUS.update({"connected": True, "port": port, "message": "OK", "ts": time.strftime("%H:%M:%S")})
-                log(f"[mscl-web] BaseStation OK port={port}")
-                return True, port
-            LAST_BASE_STATUS.update({"connected": False, "port": port, "message": "Ping failed", "ts": time.strftime("%H:%M:%S")})
-            log("[mscl-web] BaseStation ping failed")
-            time.sleep(CONNECT_BACKOFF_SEC)
-            return False, "Ping failed"
-        except Exception as e:
-            LAST_BASE_STATUS.update({"connected": False, "port": port, "message": str(e), "ts": time.strftime("%H:%M:%S")})
-            log(f"[mscl-web] BaseStation connect error: {e}")
-            time.sleep(CONNECT_BACKOFF_SEC)
-            return False, str(e)
-
-def ensure_beacon_on():
-    global BASE_BEACON_STATE
-    if BASE_STATION is None:
+def _stream_loop():
+    if not MSCL_STREAM_ENABLED:
+        log("[mscl-stream] Disabled via MSCL_STREAM_ENABLED")
         return
-    if BASE_BEACON_STATE is True:
+    if not all([INFLUX_TOKEN, INFLUX_ORG, INFLUX_BUCKET]):
+        log("[mscl-stream] Missing INFLUX_TOKEN / INFLUX_ORG / INFLUX_BUCKET; stream disabled")
         return
-    try:
-        BASE_STATION.enableBeacon()
-        BASE_BEACON_STATE = True
-        log("[mscl-web] [BEACON] auto-enabled for node communication")
-    except Exception as e:
-        log(f"[mscl-web] [BEACON] auto-enable failed: {e}")
 
-def ch1_mask():
-    mask = mscl.ChannelMask()
-    mask.enable(1)
-    return mask
+    log(f"[mscl-stream] Influx target: {INFLUX_URL} bucket={INFLUX_BUCKET} org={INFLUX_ORG} measurement={MSCL_MEASUREMENT}")
+    db_client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
+    write_api = db_client.write_api(
+        write_options=WriteOptions(
+            batch_size=MSCL_STREAM_BATCH_SIZE,
+            flush_interval=MSCL_STREAM_FLUSH_INTERVAL_MS,
+            jitter_interval=200,
+            retry_interval=1000,
+            max_retries=3,
+            max_retry_delay=10000,
+            max_retry_time=60000,
+            exponential_base=2,
+        ),
+        write_type=ASYNCHRONOUS,
+    )
 
-def ch2_mask():
-    mask = mscl.ChannelMask()
-    mask.enable(2)
-    return mask
+    queue_cond = threading.Condition()
+    packet_queue = deque()
+    last_ch1_ts = 0.0
+    last_drop_log_ts = 0.0
+    last_diag = {}
 
-def set_idle_with_retry(node, node_id, stage_tag, attempts=2, delay_sec=0.8, required=False):
-    last_err = None
-    for i in range(1, attempts + 1):
+    def _note_diag(channel, value):
+        last_diag[channel] = value
+
+    def _maybe_log_drop(now_ts):
+        nonlocal last_drop_log_ts
+        if last_ch1_ts <= 0:
+            return
+        gap = now_ts - last_ch1_ts
+        if gap < MSCL_STREAM_DROP_WARN_SEC:
+            return
+        if now_ts - last_drop_log_ts < MSCL_STREAM_DROP_LOG_THROTTLE_SEC:
+            return
+        last_drop_log_ts = now_ts
+        diag_summary = ", ".join(
+            f"{k}={last_diag.get(k)}"
+            for k in (
+                "diagnostic_state",
+                "diagnostic_syncFailures",
+                "diagnostic_totalDroppedPackets",
+                "diagnostic_lowBatteryFlag",
+                "diagnostic_memoryFull",
+            )
+        )
+        log(f"[mscl-stream] Warning: no ch1 data for {gap:.1f}s; {diag_summary}")
+
+    def _reader_loop():
+        backoff = 1.0
+        backoff_max = 10.0
+        while True:
+            try:
+                ok, _ = internal_connect()
+                if not ok or state.BASE_STATION is None:
+                    time.sleep(backoff)
+                    backoff = min(backoff_max, backoff * 1.7)
+                    continue
+
+                with state.OP_LOCK:
+                    base_station = state.BASE_STATION
+                    if base_station is None:
+                        time.sleep(MSCL_STREAM_IDLE_SLEEP)
+                        continue
+                    packets = base_station.getData(MSCL_STREAM_READ_TIMEOUT_MS)
+
+                if not packets:
+                    backoff = 1.0
+                    time.sleep(MSCL_STREAM_IDLE_SLEEP)
+                    continue
+
+                with queue_cond:
+                    packet_queue.extend(packets)
+                    while len(packet_queue) > MSCL_STREAM_QUEUE_MAX:
+                        packet_queue.popleft()
+                    queue_cond.notify_all()
+                backoff = 1.0
+
+            except Exception as e:
+                log(f"[mscl-stream] Reader error: {e}")
+                state.BASE_STATION = None
+                state.LAST_PING_OK_TS = 0
+                time.sleep(backoff)
+                backoff = min(backoff_max, backoff * 1.7)
+
+    threading.Thread(target=_reader_loop, daemon=True).start()
+
+    while True:
         try:
-            node.setToIdle()
-            log(f"[mscl-web] [PREP-IDLE] {stage_tag} success node_id={node_id} attempt {i}/{attempts}")
-            return True
+            with queue_cond:
+                if not packet_queue:
+                    queue_cond.wait(timeout=MSCL_STREAM_QUEUE_WAIT_MS / 1000.0)
+                packets = []
+                while packet_queue:
+                    packets.append(packet_queue.popleft())
+
+            if not packets:
+                time.sleep(MSCL_STREAM_IDLE_SLEEP)
+                continue
+
+            points = []
+            channel_counts = {}
+            for packet in packets:
+                node_address = str(packet.nodeAddress())
+                for dp in packet.data():
+                    channel = _point_channel(dp)
+                    if MSCL_ONLY_CHANNEL_1 and channel not in ("channel_1", "ch1"):
+                        continue
+                    value = _point_value(dp)
+                    if value is None:
+                        continue
+                    if channel.startswith("diagnostic_"):
+                        _note_diag(channel, value)
+                    point = (
+                        Point(MSCL_MEASUREMENT)
+                        .tag("node_id", node_address)
+                        .tag("channel", channel)
+                        .tag("source", "mscl_config_stream")
+                        .field("value", value)
+                    )
+                    points.append(point)
+                    channel_counts[channel] = channel_counts.get(channel, 0) + 1
+                    if channel in ("channel_1", "ch1"):
+                        last_ch1_ts = time.time()
+
+            if points:
+                write_api.write(INFLUX_BUCKET, INFLUX_ORG, points)
+                channels_txt = ", ".join(f"{k}:{v}" for k, v in sorted(channel_counts.items()))
+                log(f"[mscl-stream] Logged {len(points)} points ({channels_txt})")
+            _maybe_log_drop(time.time())
+
         except Exception as e:
-            last_err = str(e)
-            log(f"[mscl-web] [PREP-IDLE] {stage_tag} fail node_id={node_id} attempt {i}/{attempts}: {e}")
-            if i < attempts:
-                time.sleep(delay_sec)
-    if required:
-        raise RuntimeError(f"Set to Idle failed at {stage_tag}: {last_err}")
-    return False
+            log(f"[mscl-stream] Writer error: {e}")
+            time.sleep(MSCL_STREAM_IDLE_SLEEP)
 
-def _node_state_info(node):
-    state_map = {
-        0: "Idle",
-        1: "Sampling",
-        2: "Sampling",
-        255: "Unknown",
-    }
-    try:
-        raw_state = node.lastDeviceState()
-        try:
-            state_num = int(raw_state)
-            state_text = state_map.get(state_num, f"State {state_num}")
-        except Exception:
-            state_num = None
-            state_text = str(raw_state)
-        # lastDeviceState() is "last known". Use communication freshness to avoid stale Sampling.
-        try:
-            raw_last_comm = str(node.lastCommunicationTime())
-            ts_base = raw_last_comm.split(".")[0]
-            dt = datetime.strptime(ts_base, "%Y-%m-%d %H:%M:%S")
-            ts_local = dt.timestamp()
-            ts_utc = dt.replace(tzinfo=timezone.utc).timestamp()
-            now = time.time()
-            age_sec = min(abs(now - ts_local), abs(now - ts_utc))
-            if age_sec > NODE_FRESH_COMM_SEC:
-                return None, f"Offline (stale {int(age_sec)}s)", f"stale_last_comm={int(age_sec)}s"
-            # lastDeviceState() is last known value; Sampling can remain stale for a while.
-            # Treat non-idle states as unreliable if comm is not very fresh.
-            if state_num in (1, 2) and age_sec > NODE_ACTIVE_STATE_FRESH_SEC:
-                return None, "Unknown", f"stale_active_state={int(age_sec)}s"
-        except Exception:
-            # If freshness cannot be computed, keep state fallback behavior.
-            pass
-        return state_num, state_text, None
-    except Exception as e:
-        return None, None, str(e)
+
+def _start_streamer():
+    t = threading.Thread(target=_stream_loop, daemon=True)
+    t.start()
+
 
 def send_idle_sensorconnect_style(node, node_id, stage_tag):
     """Set-to-idle flow from official example: setToIdle -> complete() -> result()."""
@@ -543,16 +376,16 @@ def _schedule_idle_after(node_id, seconds, token):
     if seconds <= 0:
         return
     time.sleep(seconds)
-    with OP_LOCK:
-        if SAMPLE_STOP_TOKENS.get(node_id) != token:
+    with state.OP_LOCK:
+        if state.SAMPLE_STOP_TOKENS.get(node_id) != token:
             return
         ok, msg = internal_connect()
-        if not ok or BASE_STATION is None:
+        if not ok or state.BASE_STATION is None:
             log(f"[mscl-web] [SAMPLE] auto-idle skipped node_id={node_id}: {msg}")
             return
         try:
             ensure_beacon_on()
-            node = mscl.WirelessNode(node_id, BASE_STATION)
+            node = mscl.WirelessNode(node_id, state.BASE_STATION)
             node.readWriteRetries(10)
             node.setToIdle()
             log(f"[mscl-web] [SAMPLE] auto-idle sent node_id={node_id} after {seconds}s")
@@ -577,6 +410,19 @@ def _sampling_duration_to_seconds(duration_value, duration_units, continuous):
         mult = 3600.0
     seconds = int(value * mult)
     return max(0, min(seconds, 86400))
+
+
+def _is_sampling_active(node_id):
+    run = state.SAMPLE_RUNS.get(node_id)
+    if not run or run.get("state") != "running":
+        return False
+    duration_sec = int(run.get("duration_sec") or 0)
+    if duration_sec <= 0:
+        return True
+    started_at = int(run.get("started_at") or 0)
+    if started_at <= 0:
+        return True
+    return (time.time() - started_at) < duration_sec
 
 
 def _set_sampling_mode_on_node(cfg, mode_key):
@@ -626,9 +472,8 @@ def _filter_sample_rates_for_model(model, supported_rates, current_rate):
 
 
 def _start_sampling_run(node_id, body):
-    global BASE_STATION
     ok, msg = internal_connect()
-    if not ok or BASE_STATION is None:
+    if not ok or state.BASE_STATION is None:
         return {"success": False, "error": f"Base station not connected: {msg}"}
 
     mode_key = str(body.get("log_transmit_mode") or "transmit").lower()
@@ -648,7 +493,7 @@ def _start_sampling_run(node_id, body):
 
     try:
         ensure_beacon_on()
-        node = mscl.WirelessNode(node_id, BASE_STATION)
+        node = mscl.WirelessNode(node_id, state.BASE_STATION)
         node.readWriteRetries(10)
         cfg = mscl.WirelessNodeConfig()
         # Keep runtime sampling config explicit and minimal.
@@ -679,7 +524,7 @@ def _start_sampling_run(node_id, body):
 
         start_mode = _start_sampling_best_effort(node, node_id)
         token = time.time()
-        SAMPLE_STOP_TOKENS[node_id] = token
+        state.SAMPLE_STOP_TOKENS[node_id] = token
         run = {
             "run_id": f"{node_id}-{int(token)}",
             "state": "running",
@@ -695,7 +540,7 @@ def _start_sampling_run(node_id, body):
             "apply_config_ok": apply_ok,
             "start_method": start_mode,
         }
-        SAMPLE_RUNS[node_id] = run
+        state.SAMPLE_RUNS[node_id] = run
         if duration_sec > 0:
             t = threading.Thread(target=_schedule_idle_after, args=(node_id, duration_sec, token), daemon=True)
             t.start()
@@ -718,16 +563,24 @@ def index(): return render_template_string(TEMPLATE_PATH.read_text())
 
 @app.route('/api/connect', methods=['POST'])
 def api_connect():
-    with OP_LOCK:
+    with state.OP_LOCK:
         s, p = internal_connect()
         return jsonify(success=s, port=p)
 
+
+@app.route('/api/disconnect', methods=['POST'])
+def api_disconnect():
+    with state.OP_LOCK:
+        state.close_base_station()
+        state.LAST_BASE_STATUS.update({"connected": False, "message": "Disconnected", "ts": time.strftime("%H:%M:%S")})
+        return jsonify(success=True, message="Disconnected")
+
 @app.route('/api/status')
 def api_status():
-    with OP_LOCK:
-        ok = BASE_STATION is not None
-        msg = LAST_BASE_STATUS.get("message", "Not connected")
-        port = LAST_BASE_STATUS.get("port", "N/A")
+    with state.OP_LOCK:
+        ok = state.BASE_STATION is not None
+        msg = state.LAST_BASE_STATUS.get("message", "Not connected")
+        port = state.LAST_BASE_STATUS.get("port", "N/A")
         now = time.time()
         def _trim_ts(value):
             try:
@@ -759,45 +612,45 @@ def api_status():
         comm_age_sec = None
         link_health = "offline"
         link_health_reason = "No active BaseStation object"
-        if ok and BASE_STATION is not None:
+        if ok and state.BASE_STATION is not None:
             try:
-                base_model = str(BASE_STATION.model())
+                base_model = str(state.BASE_STATION.model())
             except Exception:
                 base_model = None
             try:
-                base_fw = str(BASE_STATION.firmwareVersion())
+                base_fw = str(state.BASE_STATION.firmwareVersion())
             except Exception:
                 base_fw = None
             try:
-                base_serial = str(BASE_STATION.serial())
+                base_serial = str(state.BASE_STATION.serial())
             except Exception:
                 try:
-                    base_serial = str(BASE_STATION.serialNumber())
+                    base_serial = str(state.BASE_STATION.serialNumber())
                 except Exception:
                     base_serial = None
             try:
-                base_region = str(BASE_STATION.regionCode())
+                base_region = str(state.BASE_STATION.regionCode())
             except Exception:
                 base_region = None
             try:
-                base_radio = str(BASE_STATION.frequency())
+                base_radio = str(state.BASE_STATION.frequency())
             except Exception:
                 base_radio = None
             try:
-                base_last_comm = _trim_ts(BASE_STATION.lastCommunicationTime())
+                base_last_comm = _trim_ts(state.BASE_STATION.lastCommunicationTime())
             except Exception:
                 base_last_comm = None
             try:
-                base_link = str(BASE_STATION.lastDeviceState())
+                base_link = str(state.BASE_STATION.lastDeviceState())
             except Exception:
                 base_link = None
-            if LAST_PING_OK_TS > 0:
-                ping_age_sec = max(0.0, now - LAST_PING_OK_TS)
+            if state.LAST_PING_OK_TS > 0:
+                ping_age_sec = max(0.0, now - state.LAST_PING_OK_TS)
             comm_age_sec = _comm_age_sec(base_last_comm)
-            if ping_age_sec is not None and ping_age_sec <= PING_TTL_SEC:
+            if ping_age_sec is not None and ping_age_sec <= state.PING_TTL_SEC:
                 link_health = "healthy"
                 link_health_reason = f"Ping fresh ({ping_age_sec:.1f}s)"
-            elif ping_age_sec is not None and ping_age_sec <= (PING_TTL_SEC * 3):
+            elif ping_age_sec is not None and ping_age_sec <= (state.PING_TTL_SEC * 3):
                 link_health = "degraded"
                 link_health_reason = f"Ping stale ({ping_age_sec:.1f}s)"
             elif ping_age_sec is not None:
@@ -818,9 +671,9 @@ def api_status():
             connected=bool(ok),
             port=port,
             message=msg,
-            beacon_state=BASE_BEACON_STATE,
-            base_connection=f"Serial, {port}, {BAUDRATE}" if port and port != "N/A" else None,
-            ts=LAST_BASE_STATUS.get("ts"),
+            beacon_state=state.BASE_BEACON_STATE,
+            base_connection=f"Serial, {port}, {state.BAUDRATE}" if port and port != "N/A" else None,
+            ts=state.LAST_BASE_STATUS.get("ts"),
             base_model=base_model,
             base_fw=base_fw,
             base_serial=base_serial,
@@ -836,44 +689,42 @@ def api_status():
 
 @app.route('/api/reconnect', methods=['POST'])
 def api_reconnect():
-    global BASE_STATION, LAST_PING_OK_TS, BASE_BEACON_STATE
-    with OP_LOCK:
-        BASE_STATION = None
-        BASE_BEACON_STATE = None
-        LAST_PING_OK_TS = 0
+    with state.OP_LOCK:
+        state.BASE_STATION = None
+        state.BASE_BEACON_STATE = None
+        state.LAST_PING_OK_TS = 0
         ok, msg = internal_connect(force_ping=True)
         return jsonify(success=bool(ok), message=msg)
 
 @app.route('/api/beacon', methods=['POST'])
 def api_beacon():
-    global BASE_STATION, BASE_BEACON_STATE
-    with OP_LOCK:
+    with state.OP_LOCK:
         ok, msg = internal_connect()
-        if not ok or BASE_STATION is None:
+        if not ok or state.BASE_STATION is None:
             return jsonify(success=False, error=f"Base station not connected: {msg}")
         body = request.json or {}
         requested = body.get("enabled", None)
         if requested is None:
-            target = not bool(BASE_BEACON_STATE)
+            target = not bool(state.BASE_BEACON_STATE)
         else:
             target = bool(requested)
         try:
             if target:
-                BASE_STATION.enableBeacon()
-                BASE_BEACON_STATE = True
+                state.BASE_STATION.enableBeacon()
+                state.BASE_BEACON_STATE = True
                 log("[mscl-web] [BEACON] enabled")
                 return jsonify(success=True, beacon_state=True, message="Beacon ON")
             disable_methods = ("disableBeacon", "setBeaconOff")
             disabled = False
             for m in disable_methods:
-                fn = getattr(BASE_STATION, m, None)
+                fn = getattr(state.BASE_STATION, m, None)
                 if callable(fn):
                     fn()
                     disabled = True
                     break
             if not disabled:
                 return jsonify(success=False, error="Beacon OFF is not supported by this MSCL API build")
-            BASE_BEACON_STATE = False
+            state.BASE_BEACON_STATE = False
             log("[mscl-web] [BEACON] disabled")
             return jsonify(success=True, beacon_state=False, message="Beacon OFF")
         except Exception as e:
@@ -881,12 +732,12 @@ def api_beacon():
 
 @app.route('/api/diagnostics/<int:node_id>')
 def api_diagnostics(node_id):
-    with OP_LOCK:
+    with state.OP_LOCK:
         ok, msg = internal_connect()
-        if not ok or BASE_STATION is None:
+        if not ok or state.BASE_STATION is None:
             return jsonify(success=False, error=f"Base station not connected: {msg}")
         try:
-            node = mscl.WirelessNode(node_id, BASE_STATION)
+            node = mscl.WirelessNode(node_id, state.BASE_STATION)
             features = node.features()
             flags = [
                 ("supportsInputRange", "supportsInputRange"),
@@ -922,30 +773,29 @@ def api_diagnostics(node_id):
 
 @app.route('/api/logs')
 def api_logs():
-    return jsonify(logs=LOG_BUFFER[-LOG_MAX:])
+    return jsonify(logs=state.LOG_BUFFER[-state.LOG_MAX:])
 
 @app.route('/api/read/<int:node_id>')
 def api_read(node_id):
-    global BASE_STATION, RATE_MAP, NODE_READ_CACHE
     read_tag = "READ"
     max_attempts = 5
     last_err = None
     log(f"[mscl-web] [{read_tag}] request node_id={node_id}")
-    with OP_LOCK:
-        cached = NODE_READ_CACHE.get(node_id, {})
+    with state.OP_LOCK:
+        cached = state.NODE_READ_CACHE.get(node_id, {})
         refresh_eeprom = True
         for attempt in range(1, max_attempts + 1):
             if attempt > 1:
                 log(f"[mscl-web] [{read_tag}] retry {attempt}/{max_attempts} node_id={node_id}")
             ok, msg = internal_connect()
-            if not ok or BASE_STATION is None:
+            if not ok or state.BASE_STATION is None:
                 last_err = f"Base station not connected: {msg}"
                 log(f"[mscl-web] [{read_tag}] failed: {last_err}")
                 time.sleep(0.5)
                 continue
             try:
                 ensure_beacon_on()
-                node = mscl.WirelessNode(node_id, BASE_STATION)
+                node = mscl.WirelessNode(node_id, state.BASE_STATION)
                 node.readWriteRetries(15)
                 # 2. Critical values (use cache-first for EEPROM-heavy fields)
                 current_rate = cached.get("current_rate")
@@ -962,8 +812,8 @@ def api_read(node_id):
                             last_err = str(e2)
                             log(f"[mscl-web] [{read_tag}] error node_id={node_id}: getSampleRate failed (2nd): {last_err}")
                             if "EEPROM" not in last_err:
-                                BASE_STATION = None
-                                LAST_PING_OK_TS = 0
+                                state.BASE_STATION = None
+                                state.LAST_PING_OK_TS = 0
                                 time.sleep(0.5)
                                 continue
                 try:
@@ -1020,7 +870,7 @@ def api_read(node_id):
                     last_comm = str(node.lastCommunicationTime()).split(".")[0]
                 except Exception:
                     last_comm = None
-                state, state_text, _ = _node_state_info(node)
+                node_state, state_text, _ = _node_state_info(node)
                 try:
                     node_address = int(node.nodeAddress())
                 except Exception:
@@ -1519,7 +1369,7 @@ def api_read(node_id):
         
                 payload = dict(
                     success=True, model=model, sn=sn, fw=fw,
-                    region=region, last_comm=last_comm, state=state, state_text=state_text,
+                    region=region, last_comm=last_comm, state=node_state, state_text=state_text,
                     node_address=node_address, frequency=frequency,
                     storage_pct=storage_pct, storage_capacity_raw=storage_capacity_raw, sampling_mode=sampling_mode, sampling_mode_raw=sampling_mode_raw,
                     current_data_mode=current_data_mode, data_mode_text=data_mode_text, data_mode_options=data_mode_options,
@@ -1554,7 +1404,7 @@ def api_read(node_id):
                     thermocouple_sensor_options=thermocouple_sensor_options,
                     rtd_wire_options=rtd_wire_options,
                 )
-                NODE_READ_CACHE[node_id] = dict(payload, ts=time.time())
+                state.NODE_READ_CACHE[node_id] = dict(payload, ts=time.time())
                 log(f"[mscl-web] [{read_tag}] success node_id={node_id} sample_rate={payload.get('current_rate')} fw={payload.get('fw')}")
                 return jsonify(**payload)
             except Exception as e:
@@ -1564,8 +1414,8 @@ def api_read(node_id):
                     backoff = min(4.0, 0.5 * (2 ** (attempt - 1)))
                     time.sleep(backoff)
                     continue
-                BASE_STATION = None
-                LAST_PING_OK_TS = 0
+                state.BASE_STATION = None
+                state.LAST_PING_OK_TS = 0
                 time.sleep(0.5)
                 continue
     if last_err:
@@ -1576,17 +1426,18 @@ def api_read(node_id):
 
 @app.route('/api/probe/<int:node_id>')
 def api_probe(node_id):
-    global BASE_STATION
     log(f"[mscl-web] Probe request node_id={node_id}")
-    with OP_LOCK:
+    with state.OP_LOCK:
         ok, msg = internal_connect()
-        if not ok or BASE_STATION is None:
+        if not ok or state.BASE_STATION is None:
             err = f"Base station not connected: {msg}"
             log(f"[mscl-web] Probe failed: {err}")
             return jsonify(success=False, error=err)
         try:
+            if _is_sampling_active(node_id):
+                return jsonify(success=False, error="Sampling active. Stop sampling before probe.")
             ensure_beacon_on()
-            node = mscl.WirelessNode(node_id, BASE_STATION)
+            node = mscl.WirelessNode(node_id, state.BASE_STATION)
             node.readWriteRetries(10)
             # Try to nudge node without touching EEPROM
             try:
@@ -1612,18 +1463,19 @@ def api_probe(node_id):
 
 @app.route('/api/node_idle/<int:node_id>', methods=['POST'])
 def api_node_idle(node_id):
-    global BASE_STATION
-    with OP_LOCK:
-        if node_id in IDLE_IN_PROGRESS:
+    with state.OP_LOCK:
+        if node_id in state.IDLE_IN_PROGRESS:
             return jsonify(success=False, error="Set to Idle already in progress")
-        IDLE_IN_PROGRESS.add(node_id)
+        if _is_sampling_active(node_id):
+            return jsonify(success=False, error="Sampling active. Stop sampling before Set to Idle.")
+        state.IDLE_IN_PROGRESS.add(node_id)
         ok, msg = internal_connect()
-        if not ok or BASE_STATION is None:
-            IDLE_IN_PROGRESS.discard(node_id)
+        if not ok or state.BASE_STATION is None:
+            state.IDLE_IN_PROGRESS.discard(node_id)
             return jsonify(success=False, error=f"Base station not connected: {msg}")
         try:
             ensure_beacon_on()
-            node = mscl.WirelessNode(node_id, BASE_STATION)
+            node = mscl.WirelessNode(node_id, state.BASE_STATION)
             node.readWriteRetries(10)
             idle_status = send_idle_sensorconnect_style(node, node_id, "manual-idle")
             sent = bool(idle_status.get("command_sent"))
@@ -1642,18 +1494,17 @@ def api_node_idle(node_id):
             log(f"[mscl-web] [PREP-IDLE] failed node_id={node_id}: {e}")
             return jsonify(success=False, error=str(e))
         finally:
-            IDLE_IN_PROGRESS.discard(node_id)
+            state.IDLE_IN_PROGRESS.discard(node_id)
 
 @app.route('/api/node_cycle_power/<int:node_id>', methods=['POST'])
 def api_node_cycle_power(node_id):
-    global BASE_STATION
-    with OP_LOCK:
+    with state.OP_LOCK:
         ok, msg = internal_connect()
-        if not ok or BASE_STATION is None:
+        if not ok or state.BASE_STATION is None:
             return jsonify(success=False, error=f"Base station not connected: {msg}")
         try:
             ensure_beacon_on()
-            node = mscl.WirelessNode(node_id, BASE_STATION)
+            node = mscl.WirelessNode(node_id, state.BASE_STATION)
             node.readWriteRetries(10)
             node.cyclePower()
             log(f"[mscl-web] [PREP-CYCLE] success node_id={node_id}")
@@ -1664,7 +1515,7 @@ def api_node_cycle_power(node_id):
 
 @app.route('/api/node_sampling/<int:node_id>', methods=['POST'])
 def api_node_sampling(node_id):
-    with OP_LOCK:
+    with state.OP_LOCK:
         body = request.json or {}
         # Backward compatibility path (old UI sent only duration_sec).
         if "duration_sec" in body:
@@ -1685,7 +1536,7 @@ def api_node_sampling(node_id):
 
 @app.route('/api/sampling/start/<int:node_id>', methods=['POST'])
 def api_sampling_start(node_id):
-    with OP_LOCK:
+    with state.OP_LOCK:
         body = request.json or {}
         res = _start_sampling_run(node_id, body)
         if not res.get("success"):
@@ -1695,24 +1546,23 @@ def api_sampling_start(node_id):
 
 @app.route('/api/sampling/stop/<int:node_id>', methods=['POST'])
 def api_sampling_stop(node_id):
-    global BASE_STATION
-    with OP_LOCK:
+    with state.OP_LOCK:
         ok, msg = internal_connect()
-        if not ok or BASE_STATION is None:
+        if not ok or state.BASE_STATION is None:
             return jsonify(success=False, error=f"Base station not connected: {msg}")
         try:
             ensure_beacon_on()
-            node = mscl.WirelessNode(node_id, BASE_STATION)
+            node = mscl.WirelessNode(node_id, state.BASE_STATION)
             node.readWriteRetries(10)
             idle_status = send_idle_sensorconnect_style(node, node_id, "stop-sampling")
-            SAMPLE_STOP_TOKENS[node_id] = time.time()
-            run = SAMPLE_RUNS.get(node_id, {})
+            state.SAMPLE_STOP_TOKENS[node_id] = time.time()
+            run = state.SAMPLE_RUNS.get(node_id, {})
             run.update({
                 "state": "stopped",
                 "stopped_at": int(time.time()),
                 "idle_result": idle_status.get("idle_result"),
             })
-            SAMPLE_RUNS[node_id] = run
+            state.SAMPLE_RUNS[node_id] = run
             if idle_status.get("state_confirmed"):
                 log(f"[mscl-web] [S-RUN] stop ok node_id={node_id}")
                 return jsonify(success=True, message="Sampling stopped", idle_status=idle_status, run=run)
@@ -1726,16 +1576,15 @@ def api_sampling_stop(node_id):
 
 @app.route('/api/sampling/status/<int:node_id>')
 def api_sampling_status(node_id):
-    global BASE_STATION
-    with OP_LOCK:
+    with state.OP_LOCK:
         state_num = None
         state_text = "Unknown"
         freshness_reason = None
         link_state = "offline"
         ok, msg = internal_connect(force_ping=False)
-        if ok and BASE_STATION is not None:
+        if ok and state.BASE_STATION is not None:
             try:
-                node = mscl.WirelessNode(node_id, BASE_STATION)
+                node = mscl.WirelessNode(node_id, state.BASE_STATION)
                 node.readWriteRetries(5)
                 state_num, state_text, freshness_reason = _node_state_info(node)
                 link_state = "ok"
@@ -1744,7 +1593,7 @@ def api_sampling_status(node_id):
         else:
             link_state = f"offline: {msg}"
 
-        run = SAMPLE_RUNS.get(node_id, {})
+        run = state.SAMPLE_RUNS.get(node_id, {})
         now = int(time.time())
         duration_sec = int(run.get("duration_sec") or 0)
         started_at = int(run.get("started_at") or 0)
@@ -1764,14 +1613,13 @@ def api_sampling_status(node_id):
 
 @app.route('/api/node_sleep/<int:node_id>', methods=['POST'])
 def api_node_sleep(node_id):
-    global BASE_STATION
-    with OP_LOCK:
+    with state.OP_LOCK:
         ok, msg = internal_connect()
-        if not ok or BASE_STATION is None:
+        if not ok or state.BASE_STATION is None:
             return jsonify(success=False, error=f"Base station not connected: {msg}")
         try:
             ensure_beacon_on()
-            node = mscl.WirelessNode(node_id, BASE_STATION)
+            node = mscl.WirelessNode(node_id, state.BASE_STATION)
             node.readWriteRetries(10)
             node.sleep()
             log(f"[mscl-web] [SLEEP] sleep command sent node_id={node_id}")
@@ -1782,22 +1630,21 @@ def api_node_sleep(node_id):
 
 @app.route('/api/clear_storage/<int:node_id>', methods=['POST'])
 def api_clear_storage(node_id):
-    global BASE_STATION, NODE_READ_CACHE
-    with OP_LOCK:
+    with state.OP_LOCK:
         ok, msg = internal_connect()
-        if not ok or BASE_STATION is None:
+        if not ok or state.BASE_STATION is None:
             return jsonify(success=False, error=f"Base station not connected: {msg}")
         try:
             ensure_beacon_on()
-            node = mscl.WirelessNode(node_id, BASE_STATION)
+            node = mscl.WirelessNode(node_id, state.BASE_STATION)
             node.readWriteRetries(15)
             set_idle_with_retry(node, node_id, "before-clear-storage", attempts=2, delay_sec=0.8, required=False)
             node.erase()
             set_idle_with_retry(node, node_id, "after-clear-storage", attempts=2, delay_sec=0.8, required=False)
-            cached = NODE_READ_CACHE.get(node_id, {})
+            cached = state.NODE_READ_CACHE.get(node_id, {})
             cached["storage_pct"] = 0.0
             cached["ts"] = time.time()
-            NODE_READ_CACHE[node_id] = cached
+            state.NODE_READ_CACHE[node_id] = cached
             log(f"[mscl-web] [CLEAR-STORAGE] success node_id={node_id}")
             return jsonify(success=True, message="Storage cleared")
         except Exception as e:
@@ -1806,12 +1653,11 @@ def api_clear_storage(node_id):
 
 @app.route('/api/write', methods=['POST'])
 def api_write():
-    global BASE_STATION, NODE_READ_CACHE
     data = request.json
     last_err = None
     last_was_eeprom = False
     log(f"[mscl-web] Write request node_id={data.get('node_id')}")
-    with OP_LOCK:
+    with state.OP_LOCK:
         for attempt in range(1, 6):
             if attempt > 1:
                 log(f"[mscl-web] Write retry {attempt}/5 node_id={data.get('node_id')}")
@@ -1820,14 +1666,14 @@ def api_write():
                 backoff = min(4.0, 0.5 * (2 ** (attempt - 1)))
                 time.sleep(backoff)
             ok, msg = internal_connect()
-            if not ok or BASE_STATION is None:
+            if not ok or state.BASE_STATION is None:
                 last_err = f"Base station not connected: {msg}"
                 log(f"[mscl-web] Write failed: {last_err}")
                 time.sleep(0.5)
                 continue
             try:
                 ensure_beacon_on()
-                node = mscl.WirelessNode(int(data['node_id']), BASE_STATION)
+                node = mscl.WirelessNode(int(data['node_id']), state.BASE_STATION)
                 node.readWriteRetries(15)
                 def _to_opt_int(v):
                     if v is None:
@@ -1895,7 +1741,7 @@ def api_write():
                 transducer_type = _to_opt_int(data.get('transducer_type')) if has_transducer_type else None
                 sensor_type = _to_opt_int(data.get('sensor_type')) if has_sensor_type else None
                 wire_type = _to_opt_int(data.get('wire_type')) if has_wire_type else None
-                cached = NODE_READ_CACHE.get(int(data['node_id']), {})
+                cached = state.NODE_READ_CACHE.get(int(data['node_id']), {})
                 if sample_rate is None or tx_power is None:
                     if sample_rate is None:
                         sample_rate = cached.get('current_rate')
@@ -2213,7 +2059,7 @@ def api_write():
                     else:
                         raise
                 # Keep UI stable after write even if subsequent EEPROM reads fail.
-                cached = NODE_READ_CACHE.get(int(data['node_id']), {})
+                cached = state.NODE_READ_CACHE.get(int(data['node_id']), {})
                 cached['current_rate'] = int(sample_rate)
                 cached['current_power'] = int(tx_power)
                 cached['current_power_enum'] = int(tx_enum)
@@ -2254,7 +2100,7 @@ def api_write():
                 enabled_ids = {int(ch_id) for ch_id in channels}
                 cached['channels'] = [{"id": i, "enabled": (i in enabled_ids)} for i in (1, 2)]
                 cached['ts'] = time.time()
-                NODE_READ_CACHE[int(data['node_id'])] = cached
+                state.NODE_READ_CACHE[int(data['node_id'])] = cached
                 log(f"[mscl-web] Write success node_id={data.get('node_id')}")
                 return jsonify(success=True)
             except Exception as e:
@@ -2263,13 +2109,14 @@ def api_write():
                 # If the node returned an EEPROM read error, keep the base connection and retry.
                 last_was_eeprom = "EEPROM" in last_err
                 if not last_was_eeprom:
-                    BASE_STATION = None
-                    LAST_PING_OK_TS = 0
+                    state.BASE_STATION = None
+                    state.LAST_PING_OK_TS = 0
                 time.sleep(0.5)
                 continue
     return jsonify(success=False, error=last_err or "Write failed")
 
 def run_config_server():
+    _start_streamer()
     app.run(host='0.0.0.0', port=5000)
 
 

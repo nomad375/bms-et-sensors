@@ -87,7 +87,8 @@
                 <div id="baseStatusText" class="small text-muted base-status-text">Status: Unknown</div>
             </div>
             <div class="d-flex gap-2">
-                <button onclick="connectBase()" class="btn btn-outline-secondary btn-sm fw-bold">🔌 Connect</button>
+                <button id="btnConnect" onclick="connectBase()" class="btn btn-outline-secondary btn-sm fw-bold">🔌 Connect</button>
+                <button id="btnDisconnect" onclick="disconnectBase()" class="btn btn-outline-secondary btn-sm fw-bold">⛔ Disconnect</button>
                 <button id="btnBeacon" onclick="toggleBeacon()" class="btn btn-outline-info btn-sm fw-bold">Beacon: ?</button>
                 <span class="text-muted align-self-center" title="Beacon ON keeps node sync/communication active. Beacon OFF is only for diagnostics/isolation and may make nodes unreachable.">ⓘ</span>
             </div>

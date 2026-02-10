@@ -7,7 +7,7 @@
 Stabilize MSCL Configurator for TC-Link-200 OEM nodes, improve base station stability, and make UI clearer.
 
 ## Key Changes (Current State)
-- HTML template moved to `app/templates/mscl_web_config.html` and loaded from `mscl_app.py`.
+- HTML template moved to `app/templates/mscl_web_config.html` and loaded from `mscl_config.py`.
 - Removed auto status refresh to reduce base station ping storms.
 - Combined “Refresh” with “Connect & Refresh” and removed top “Check USB” button.
 - Added “Node Settings” header above editable parameters.
@@ -37,7 +37,7 @@ Stabilize MSCL Configurator for TC-Link-200 OEM nodes, improve base station stab
 - Communication Protocol: keep default (usually 1)
 
 ## Files Touched
-- `app/mscl_app.py`
+- `app/mscl_config.py`
 - `app/templates/mscl_web_config.html`
 - `notes.md`
 
