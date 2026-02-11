@@ -38,6 +38,7 @@ from mscl_constants import (
     _unit_family,
     _wt,
 )
+from mscl_utils import sample_rate_text_to_hz
 
 import mscl_state as state
 import MSCL as mscl  # type: ignore
@@ -400,37 +401,18 @@ def _compute_export_clock_offset_ns(rows, node_id=None, min_skew_sec=2.0):
 
 
 def _sample_rate_text_to_hz(rate_text):
-    s = str(rate_text or "").strip().lower().replace("-", " ")
-    if not s:
-        return None
-
-    # Matches "64 hz", "1 khz", etc.
-    hz = _rate_label_to_hz(s)
+    hz = sample_rate_text_to_hz(rate_text)
     if hz is not None:
-        try:
-            hz_v = float(hz)
-            if hz_v > 0:
-                return hz_v
-        except Exception:
-            pass
+        return hz
 
-    # Matches "64 hertz" style from some MSCL wrappers.
+    # Fallback for "N hertz" style produced by some MSCL wrappers.
+    s = str(rate_text or "").strip().lower().replace("-", " ")
     if "hertz" in s:
         head = s.split("hertz", 1)[0].strip()
         try:
             v = float(head.split()[-1])
             if v > 0:
                 return v
-        except Exception:
-            pass
-
-    # Matches "every N seconds/minutes/hours".
-    sec = _rate_label_to_interval_seconds(s)
-    if sec is not None:
-        try:
-            sec_v = float(sec)
-            if sec_v > 0:
-                return 1.0 / sec_v
         except Exception:
             pass
     return None
@@ -1834,6 +1816,44 @@ def api_metrics():
     metrics["base_connected"] = bool(state.BASE_STATION is not None)
     metrics["base_port"] = state.CURRENT_PORT
     return jsonify(metrics=metrics)
+
+
+@app.route('/api/health')
+def api_health():
+    now = time.time()
+    with state.OP_LOCK:
+        connected = bool(state.BASE_STATION is not None)
+        ping_age_sec = None
+        if state.LAST_PING_OK_TS:
+            ping_age_sec = max(0.0, now - float(state.LAST_PING_OK_TS))
+        stream_pause_until = float(getattr(state, "STREAM_PAUSE_UNTIL", 0.0) or 0.0)
+        stream_paused = now < stream_pause_until
+        queue_depth = int(metric_snapshot().get("stream_queue_depth", 0))
+
+        status = "ok"
+        reasons = []
+        if not connected:
+            status = "degraded"
+            reasons.append("base_disconnected")
+        if ping_age_sec is not None and ping_age_sec > float(state.PING_TTL_SEC):
+            status = "degraded"
+            reasons.append("ping_stale")
+        if stream_paused:
+            status = "degraded"
+            reasons.append("stream_paused")
+
+        return jsonify(
+            status=status,
+            ts=int(now),
+            connected=connected,
+            base_port=state.CURRENT_PORT,
+            ping_age_sec=round(ping_age_sec, 3) if ping_age_sec is not None else None,
+            ping_ttl_sec=float(state.PING_TTL_SEC),
+            stream_paused=bool(stream_paused),
+            stream_pause_remaining_sec=round(max(0.0, stream_pause_until - now), 3),
+            stream_queue_depth=queue_depth,
+            reasons=reasons,
+        )
 
 @app.route('/api/read/<int:node_id>')
 def api_read(node_id):
