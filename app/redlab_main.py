@@ -24,9 +24,8 @@ def get_device():
             dev.connect()
             print(f">>> Successfully connected: {devices[0].product_name}")
             return dev
-        else:
-            print("--- Device not found in USB. Exiting for container restart...")
-            sys.exit(1) # Let Docker restart the container to refresh USB stack
+        print("--- Device not found in USB. Exiting for container restart...")
+        sys.exit(1) # Let Docker restart the container to refresh USB stack
     except Exception as e:
         print(f"!!! Connection error: {e}")
         sys.exit(1)
@@ -39,20 +38,20 @@ def main():
     # Initialize InfluxDB Client
     client = InfluxDBClient(url=URL, token=TOKEN, org=ORG)
     write_api = client.write_api(write_options=SYNCHRONOUS)
-    
+
     daq_device = None
     try:
         # 1. Connect to device
         daq_device = get_device()
         ai_device = daq_device.get_ai_device()
         ai_config = ai_device.get_config()
-        
+
         # 2. Configure all 8 channels as K-type thermocouples
         for ch in range(8):
             ai_config.set_chan_tc_type(ch, TcType.K)
-        
+
         print(">>> Data acquisition loop started.")
-        
+
         # 3. Main polling loop
         while True:
             points = []
@@ -74,10 +73,10 @@ def main():
                     # We skip these channels silently to avoid log spamming
                     if e.error_code == 85:
                         continue
-                    
+
                     # Any other hardware error (e.g. device disconnected) triggers restart
                     print(f"\n!!! Hardware error on CH{ch}: {e}")
-                    sys.exit(1) 
+                    sys.exit(1)
 
             # Write collected points to InfluxDB
             if points:
@@ -88,7 +87,7 @@ def main():
                         print("Logged: " + " | ".join(log_data))
                 except Exception as e:
                     print(f"!!! InfluxDB Write Error: {e}")
-            
+
             time.sleep(1)
 
     except Exception as e:

@@ -4,6 +4,7 @@ import os
 import threading
 import time
 from datetime import datetime, timezone
+from typing import Any
 
 from mscl_constants import mscl
 
@@ -26,13 +27,13 @@ class SharedOpLock:
             lock_dir = os.path.dirname(self._lock_path)
             if lock_dir:
                 os.makedirs(lock_dir, exist_ok=True)
-            fh = open(self._lock_path, "a+")
+            fh = open(self._lock_path, "a+", encoding="utf-8")
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
             self._tls.fh = fh
         self._tls.depth = depth + 1
         return self
 
-    def __exit__(self, exc_type, exc, tb):
+    def __exit__(self, _exc_type, _exc, _tb):
         depth = getattr(self._tls, "depth", 1) - 1
         self._tls.depth = depth
         if depth == 0:
@@ -59,15 +60,15 @@ CONNECT_BACKOFF_SEC = 1.5
 CURRENT_PORT = None
 LAST_CONNECT_ATTEMPT_TS = 0
 CONNECT_MIN_INTERVAL_SEC = 2.0
-NODE_READ_CACHE = {}
+NODE_READ_CACHE: dict[int, dict[str, Any]] = {}
 BASE_BEACON_STATE = None
 NODE_FRESH_COMM_SEC = 45
 NODE_ACTIVE_STATE_FRESH_SEC = 8
-SAMPLE_STOP_TOKENS = {}
-SAMPLE_RUNS = {}
-IDLE_IN_PROGRESS = set()
+SAMPLE_STOP_TOKENS: dict[int, int] = {}
+SAMPLE_RUNS: dict[int, dict[str, Any]] = {}
+IDLE_IN_PROGRESS: set[int] = set()
 STREAM_PAUSE_UNTIL = 0.0
-NODE_EXPORT_CLOCK_OFFSET_NS = {}
+NODE_EXPORT_CLOCK_OFFSET_NS: dict[int, int] = {}
 METRICS = {
     "base_reconnect_attempts": 0,
     "base_reconnect_successes": 0,
@@ -312,7 +313,7 @@ def _node_state_info(node):
             state_text = str(raw_state)
         try:
             raw_last_comm = str(node.lastCommunicationTime())
-            ts_base = raw_last_comm.split(".")[0]
+            ts_base = raw_last_comm.split(".", maxsplit=1)[0]
             dt = datetime.strptime(ts_base, "%Y-%m-%d %H:%M:%S")
             ts_local = dt.timestamp()
             ts_utc = dt.replace(tzinfo=timezone.utc).timestamp()

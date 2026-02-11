@@ -4,7 +4,7 @@ import re
 mscl_path = '/usr/lib/python3.12/dist-packages'
 if mscl_path not in sys.path:
     sys.path.append(mscl_path)
-import MSCL as mscl  # type: ignore
+import MSCL as mscl  # type: ignore  # noqa: E402
 
 def _build_rate_map():
     # Read sample-rate enums from installed MSCL to avoid hardcoded mismatch

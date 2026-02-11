@@ -37,11 +37,11 @@ class BaseAccessLock:
         lock_dir = os.path.dirname(self.lock_file)
         if lock_dir:
             os.makedirs(lock_dir, exist_ok=True)
-        self.fh = open(self.lock_file, "a+")
+        self.fh = open(self.lock_file, "a+", encoding="utf-8")
         fcntl.flock(self.fh.fileno(), fcntl.LOCK_EX)
         return self
 
-    def __exit__(self, exc_type, exc, tb):
+    def __exit__(self, _exc_type, _exc, _tb):
         if self.fh is not None:
             fcntl.flock(self.fh.fileno(), fcntl.LOCK_UN)
             self.fh.close()
@@ -93,15 +93,15 @@ def _point_channel(dp):
 
 def _point_value(dp):
     for getter in (
-        lambda: dp.as_float(),
-        lambda: dp.as_double(),
-        lambda: dp.as_int32(),
-        lambda: dp.as_uint32(),
-        lambda: dp.as_int16(),
-        lambda: dp.as_uint16(),
-        lambda: dp.as_int8(),
-        lambda: dp.as_uint8(),
-        lambda: dp.value(),
+        dp.as_float,
+        dp.as_double,
+        dp.as_int32,
+        dp.as_uint32,
+        dp.as_int16,
+        dp.as_uint16,
+        dp.as_int8,
+        dp.as_uint8,
+        dp.value,
     ):
         try:
             return float(getter())
