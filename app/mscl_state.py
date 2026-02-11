@@ -66,6 +66,8 @@ NODE_ACTIVE_STATE_FRESH_SEC = 8
 SAMPLE_STOP_TOKENS = {}
 SAMPLE_RUNS = {}
 IDLE_IN_PROGRESS = set()
+STREAM_PAUSE_UNTIL = 0.0
+NODE_EXPORT_CLOCK_OFFSET_NS = {}
 METRICS = {
     "base_reconnect_attempts": 0,
     "base_reconnect_successes": 0,

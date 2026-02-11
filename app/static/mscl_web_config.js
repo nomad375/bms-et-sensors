@@ -241,7 +241,7 @@
                 markIdleState(String(data.state) === "0");
             } else {
                 statusDiv.className = "mt-2 text-center status-err";
-                statusDiv.innerHTML = "❌ Ошибка: " + data.error;
+                statusDiv.innerHTML = "❌ Error: " + data.error;
                 document.getElementById('btnClearStorage').disabled = true;
                 markIdleState(false);
             }
@@ -494,7 +494,7 @@
                 })
             });
             const data = await res.json();
-            statusDiv.innerHTML = data.success ? "<span class='status-ok'>✅ УСПЕШНО СОХРАНЕНО</span>" : `<span class='status-err'>❌ ${data.error}</span>`;
+            statusDiv.innerHTML = data.success ? "<span class='status-ok'>✅ SAVED SUCCESSFULLY</span>" : `<span class='status-err'>❌ ${data.error}</span>`;
         } catch (e) { }
     }
 

@@ -2,12 +2,15 @@ import logging
 import os
 import time
 import threading
+import csv
+import io
+import json
 from collections import deque
 from datetime import datetime, timezone
 
-from flask import Flask, render_template, request, jsonify  # type: ignore
+from flask import Flask, render_template, request, jsonify, send_file, Response  # type: ignore
 from influxdb_client import InfluxDBClient, Point  # type: ignore
-from influxdb_client.client.write_api import ASYNCHRONOUS, WriteOptions  # type: ignore
+from influxdb_client.client.write_api import ASYNCHRONOUS, SYNCHRONOUS, WriteOptions  # type: ignore
 from influxdb_client.domain.write_precision import WritePrecision  # type: ignore
 
 from mscl_constants import (
@@ -78,6 +81,14 @@ MSCL_STREAM_QUEUE_WAIT_MS = int(os.getenv("MSCL_STREAM_QUEUE_WAIT_MS", "200"))
 MSCL_STREAM_DROP_WARN_SEC = float(os.getenv("MSCL_STREAM_DROP_WARN_SEC", "30"))
 MSCL_STREAM_DROP_LOG_THROTTLE_SEC = float(os.getenv("MSCL_STREAM_DROP_LOG_THROTTLE_SEC", "30"))
 MSCL_STREAM_LOG_INTERVAL_SEC = float(os.getenv("MSCL_STREAM_LOG_INTERVAL_SEC", "5"))
+MSCL_EXPORT_ALIGN_MIN_SKEW_SEC = float(os.getenv("MSCL_EXPORT_ALIGN_MIN_SKEW_SEC", "2.0"))
+MSCL_EXPORT_OFFSET_RECALC_THRESHOLD_SEC = float(os.getenv("MSCL_EXPORT_OFFSET_RECALC_THRESHOLD_SEC", "3.0"))
+MSCL_EXPORT_OFFSET_RECALC_MAX_SKEW_SEC = float(os.getenv("MSCL_EXPORT_OFFSET_RECALC_MAX_SKEW_SEC", "30.0"))
+MSCL_EXPORT_INFLUX_BATCH = int(os.getenv("MSCL_EXPORT_INFLUX_BATCH", "5000"))
+MSCL_SOURCE_RADIO = os.getenv("MSCL_SOURCE_RADIO", "mscl_config_stream")
+MSCL_SOURCE_NODE_EXPORT = os.getenv("MSCL_SOURCE_NODE_EXPORT", "mscl_node_export")
+MSCL_META_MEASUREMENT = os.getenv("MSCL_META_MEASUREMENT", "mscl_meta")
+MSCL_META_OFFSET_METRIC = "node_export_clock_offset_ns"
 
 
 def _point_channel(dp):
@@ -127,6 +138,516 @@ def _point_time_ns(dp):
     except Exception:
         pass
     return time.time_ns()
+
+
+def _timestamp_to_ns(ts):
+    try:
+        sec = int(ts.seconds())
+        nsec = int(ts.nanoseconds())
+        if sec <= 0:
+            return None
+        if nsec < 0:
+            nsec = 0
+        elif nsec > 999_999_999:
+            nsec = 999_999_999
+        return (sec * 1_000_000_000) + nsec
+    except Exception:
+        return None
+
+
+def _ns_to_iso_utc(ts_ns):
+    try:
+        ts_ns = int(ts_ns)
+        sec = ts_ns // 1_000_000_000
+        nsec = ts_ns % 1_000_000_000
+        dt = datetime.fromtimestamp(sec, tz=timezone.utc)
+        return f"{dt.strftime('%Y-%m-%dT%H:%M:%S')}.{nsec:09d}Z"
+    except Exception:
+        return None
+
+
+def _logged_sweep_time_ns(sweep):
+    try:
+        return _timestamp_to_ns(sweep.timestamp()) or time.time_ns()
+    except Exception:
+        return time.time_ns()
+
+
+def _coerce_logged_sweeps(batch):
+    # MSCL Python bindings may return either LoggedDataSweep or LoggedDataSweeps.
+    if batch is None:
+        return []
+    if hasattr(batch, "data") and callable(getattr(batch, "data", None)):
+        return [batch]
+    try:
+        return list(batch)
+    except Exception:
+        return [batch]
+
+
+def _logged_sweep_rows(node_id, session_index, sample_rate_text, sweep):
+    rows = []
+    ts_ns = _logged_sweep_time_ns(sweep)
+    ts_iso = _ns_to_iso_utc(ts_ns)
+    try:
+        tick = int(sweep.tick())
+    except Exception:
+        tick = None
+    try:
+        cal_applied = bool(sweep.calApplied())
+    except Exception:
+        cal_applied = None
+
+    try:
+        datapoints = sweep.data()
+    except Exception:
+        datapoints = []
+
+    for dp in datapoints:
+        value = _point_value(dp)
+        if value is None:
+            continue
+        channel = _point_channel(dp)
+        channel_id = None
+        try:
+            channel_id = int(dp.channelId())
+        except Exception:
+            pass
+        rows.append(
+            {
+                "timestamp_utc": ts_iso,
+                "timestamp_ns": int(ts_ns),
+                "node_id": int(node_id),
+                "session_index": session_index,
+                "sample_rate": sample_rate_text,
+                "channel": channel,
+                "channel_id": channel_id,
+                "value": float(value),
+                "tick": tick,
+                "cal_applied": cal_applied,
+            }
+        )
+    return rows
+
+
+def _pause_stream_reader(seconds, reason=""):
+    try:
+        sec = max(0.0, float(seconds))
+    except Exception:
+        sec = 0.0
+    if sec <= 0:
+        return
+    until = time.time() + sec
+    prev = float(getattr(state, "STREAM_PAUSE_UNTIL", 0.0) or 0.0)
+    if until > prev:
+        state.STREAM_PAUSE_UNTIL = until
+        if reason:
+            log(f"[mscl-stream] pause {sec:.1f}s reason={reason}")
+        else:
+            log(f"[mscl-stream] pause {sec:.1f}s")
+
+
+def _query_bool(name, default=False):
+    raw = request.args.get(name, None)
+    if raw is None:
+        return bool(default)
+    s = str(raw).strip().lower()
+    if s in ("1", "true", "yes", "on"):
+        return True
+    if s in ("0", "false", "no", "off"):
+        return False
+    return bool(default)
+
+
+def _parse_iso_utc_to_ns(raw_value, name):
+    s = str(raw_value or "").strip()
+    if not s:
+        raise ValueError(f"Missing {name}")
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except Exception:
+        raise ValueError(f"Invalid {name}. Use ISO datetime (example: 2026-02-11T12:00:00Z).")
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    dt_utc = dt.astimezone(timezone.utc)
+    return int(dt_utc.timestamp() * 1_000_000_000)
+
+
+def _load_persisted_export_offset_ns(node_id):
+    if not all([INFLUX_TOKEN, INFLUX_ORG, INFLUX_BUCKET]):
+        return None
+    node_tag = str(int(node_id))
+    bucket_q = json.dumps(INFLUX_BUCKET)
+    measurement_q = json.dumps(MSCL_META_MEASUREMENT)
+    node_q = json.dumps(node_tag)
+    metric_q = json.dumps(MSCL_META_OFFSET_METRIC)
+    flux = (
+        f'from(bucket: {bucket_q})\n'
+        f'  |> range(start: -3650d)\n'
+        f'  |> filter(fn: (r) => r._measurement == {measurement_q})\n'
+        f'  |> filter(fn: (r) => r._field == "value")\n'
+        f'  |> filter(fn: (r) => r.node_id == {node_q})\n'
+        f'  |> filter(fn: (r) => r.metric == {metric_q})\n'
+        f'  |> last()'
+    )
+    try:
+        with InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG) as db_client:
+            for rec in db_client.query_api().query_stream(query=flux, org=INFLUX_ORG):
+                try:
+                    return int(rec.get_value())
+                except Exception:
+                    continue
+    except Exception as e:
+        log(f"[mscl-web] [EXPORT-STORAGE] offset-load failed node_id={node_id}: {e}")
+    return None
+
+
+def _persist_export_offset_ns(node_id, offset_ns):
+    if not all([INFLUX_TOKEN, INFLUX_ORG, INFLUX_BUCKET]):
+        return
+    try:
+        node_tag = str(int(node_id))
+        off = int(offset_ns)
+    except Exception:
+        return
+    point = (
+        Point(MSCL_META_MEASUREMENT)
+        .tag("node_id", node_tag)
+        .tag("metric", MSCL_META_OFFSET_METRIC)
+        .field("value", off)
+        .time(time.time_ns(), WritePrecision.NS)
+    )
+    try:
+        with InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG) as db_client:
+            db_client.write_api(write_options=SYNCHRONOUS).write(INFLUX_BUCKET, INFLUX_ORG, [point])
+    except Exception as e:
+        log(f"[mscl-web] [EXPORT-STORAGE] offset-persist failed node_id={node_id}: {e}")
+
+
+def _compute_export_clock_offset_ns(rows, node_id=None, min_skew_sec=2.0):
+    """Estimate node->host clock offset using the newest datalog timestamp."""
+    if not rows:
+        return 0, 0
+    max_node_ts = 0
+    for row in rows:
+        try:
+            t = int(row.get("timestamp_ns"))
+        except Exception:
+            continue
+        if t > max_node_ts:
+            max_node_ts = t
+    if max_node_ts <= 0:
+        return 0, 0
+    skew_ns = int(time.time_ns()) - int(max_node_ts)
+    min_skew_ns = int(float(min_skew_sec) * 1_000_000_000)
+    drift_threshold_ns = int(max(0.0, float(MSCL_EXPORT_OFFSET_RECALC_THRESHOLD_SEC)) * 1_000_000_000)
+    recalc_max_skew_ns = int(max(0.0, float(MSCL_EXPORT_OFFSET_RECALC_MAX_SKEW_SEC)) * 1_000_000_000)
+
+    # Keep a stable per-node offset to avoid shifting the same historical points
+    # to different timestamps on repeated exports.
+    chosen = 0 if abs(skew_ns) <= min_skew_ns else int(skew_ns)
+    node_key = None
+    try:
+        if node_id is not None:
+            node_key = int(node_id)
+    except Exception:
+        node_key = None
+
+    def _should_recalc(existing_offset_ns):
+        # Recalculate only for near-real-time exports; for historical exports
+        # (large skew) keep stable offset to avoid timestamp churn.
+        if abs(skew_ns) > recalc_max_skew_ns:
+            return False
+        return abs(int(existing_offset_ns) - int(skew_ns)) > drift_threshold_ns
+
+    if node_key is not None:
+        cached = state.NODE_EXPORT_CLOCK_OFFSET_NS.get(node_key)
+        if cached is not None:
+            try:
+                cached_i = int(cached)
+                if _should_recalc(cached_i):
+                    state.NODE_EXPORT_CLOCK_OFFSET_NS[node_key] = int(chosen)
+                    _persist_export_offset_ns(node_key, chosen)
+                    log(
+                        f"[mscl-web] [EXPORT-STORAGE] offset-recalc node_id={node_key} "
+                        f"from={cached_i} to={chosen} skew_ns={skew_ns}"
+                    )
+                    return int(chosen), skew_ns
+                return cached_i, skew_ns
+            except Exception:
+                pass
+        persisted = _load_persisted_export_offset_ns(node_key)
+        if persisted is not None:
+            try:
+                persisted_i = int(persisted)
+                if _should_recalc(persisted_i):
+                    state.NODE_EXPORT_CLOCK_OFFSET_NS[node_key] = int(chosen)
+                    _persist_export_offset_ns(node_key, chosen)
+                    log(
+                        f"[mscl-web] [EXPORT-STORAGE] offset-refresh node_id={node_key} "
+                        f"from={persisted_i} to={chosen} skew_ns={skew_ns}"
+                    )
+                    return int(chosen), skew_ns
+                state.NODE_EXPORT_CLOCK_OFFSET_NS[node_key] = persisted_i
+                return persisted_i, skew_ns
+            except Exception:
+                pass
+
+    if node_key is not None:
+        state.NODE_EXPORT_CLOCK_OFFSET_NS[node_key] = int(chosen)
+        _persist_export_offset_ns(node_key, chosen)
+    return chosen, skew_ns
+
+
+def _sample_rate_text_to_hz(rate_text):
+    s = str(rate_text or "").strip().lower().replace("-", " ")
+    if not s:
+        return None
+
+    # Matches "64 hz", "1 khz", etc.
+    hz = _rate_label_to_hz(s)
+    if hz is not None:
+        try:
+            hz_v = float(hz)
+            if hz_v > 0:
+                return hz_v
+        except Exception:
+            pass
+
+    # Matches "64 hertz" style from some MSCL wrappers.
+    if "hertz" in s:
+        head = s.split("hertz", 1)[0].strip()
+        try:
+            v = float(head.split()[-1])
+            if v > 0:
+                return v
+        except Exception:
+            pass
+
+    # Matches "every N seconds/minutes/hours".
+    sec = _rate_label_to_interval_seconds(s)
+    if sec is not None:
+        try:
+            sec_v = float(sec)
+            if sec_v > 0:
+                return 1.0 / sec_v
+        except Exception:
+            pass
+    return None
+
+
+def _backfill_rows_to_influx_stream(node_id, rows, time_offset_ns=0, source_tag=MSCL_SOURCE_NODE_EXPORT):
+    if not rows:
+        return {"written": 0, "skipped_existing": 0}
+    if not all([INFLUX_TOKEN, INFLUX_ORG, INFLUX_BUCKET]):
+        raise RuntimeError("Influx is not configured (missing token/org/bucket)")
+
+    node_tag = str(int(node_id))
+    source_tag = str(source_tag or MSCL_SOURCE_NODE_EXPORT)
+    batch = []
+    total_written = 0
+    total_skipped_existing = 0
+    point_key_counts = {}
+    channel_ranges = {}
+    raw_channel_ranges = {}
+    candidates = []
+    tick_time_bases = {}
+
+    with InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG) as db_client:
+        query_api = db_client.query_api()
+        write_api = db_client.write_api(write_options=SYNCHRONOUS)
+
+        for row in rows:
+            channel = str(row.get("channel") or "").strip()
+            if not channel:
+                continue
+            try:
+                value = float(row.get("value"))
+                raw_ts_ns = int(row.get("timestamp_ns"))
+            except Exception:
+                continue
+            tick_raw = row.get("tick")
+            tick_val = None
+            try:
+                if tick_raw is not None:
+                    tick_val = int(tick_raw)
+            except Exception:
+                tick_val = None
+            session_idx = row.get("session_index")
+            try:
+                if session_idx is not None:
+                    session_idx = int(session_idx)
+            except Exception:
+                session_idx = None
+            rate_hz = _sample_rate_text_to_hz(row.get("sample_rate"))
+
+            ts_base_ns = int(raw_ts_ns)
+            # Node datalog timestamps are often coarse (1-second resolution).
+            # Reconstruct sub-second timing from sweep tick + sample rate when available.
+            if tick_val is not None and rate_hz is not None and float(rate_hz) > 0:
+                base_key = (str(channel), session_idx)
+                base = tick_time_bases.get(base_key)
+                if base is None:
+                    base = {"tick": int(tick_val), "ts": int(raw_ts_ns), "rate_hz": float(rate_hz)}
+                    tick_time_bases[base_key] = base
+                try:
+                    step_ns = int(round(1_000_000_000.0 / float(base["rate_hz"])))
+                    rel = int(tick_val) - int(base["tick"])
+                    ts_base_ns = int(base["ts"]) + (rel * step_ns)
+                except Exception:
+                    ts_base_ns = int(raw_ts_ns)
+
+            ts_ns = int(ts_base_ns) + int(time_offset_ns)
+            if ts_ns <= 0:
+                continue
+
+            # Keep point identity consistent with live stream writer for points created in this run.
+            key = (node_tag, channel, ts_ns)
+            dup_idx = point_key_counts.get(key, 0)
+            point_key_counts[key] = dup_idx + 1
+            if dup_idx:
+                ts_ns += dup_idx
+
+            rng = channel_ranges.get(channel)
+            if rng is None:
+                channel_ranges[channel] = [ts_ns, ts_ns]
+            else:
+                if ts_ns < rng[0]:
+                    rng[0] = ts_ns
+                if ts_ns > rng[1]:
+                    rng[1] = ts_ns
+            raw_rng = raw_channel_ranges.get(channel)
+            if raw_rng is None:
+                raw_channel_ranges[channel] = [raw_ts_ns, raw_ts_ns]
+            else:
+                if raw_ts_ns < raw_rng[0]:
+                    raw_rng[0] = raw_ts_ns
+                if raw_ts_ns > raw_rng[1]:
+                    raw_rng[1] = raw_ts_ns
+            candidates.append((channel, ts_ns, value, raw_ts_ns, tick_val))
+
+        existing_by_channel = {}
+        existing_raw_by_channel = {}
+        bucket_q = json.dumps(INFLUX_BUCKET)
+        measurement_q = json.dumps(MSCL_MEASUREMENT)
+        node_q = json.dumps(node_tag)
+        source_q = json.dumps(source_tag)
+
+        for channel, rng in channel_ranges.items():
+            start_ns = int(rng[0])
+            stop_ns = int(rng[1]) + 1
+            start_iso = _ns_to_iso_utc(start_ns)
+            stop_iso = _ns_to_iso_utc(stop_ns)
+            if not start_iso or not stop_iso:
+                existing_by_channel[channel] = set()
+                continue
+            ch_q = json.dumps(str(channel))
+            start_q = json.dumps(start_iso)
+            stop_q = json.dumps(stop_iso)
+            flux = (
+                f'from(bucket: {bucket_q})\n'
+                f'  |> range(start: time(v: {start_q}), stop: time(v: {stop_q}))\n'
+                f'  |> filter(fn: (r) => r._measurement == {measurement_q})\n'
+                f'  |> filter(fn: (r) => r._field == "value")\n'
+                f'  |> filter(fn: (r) => r.node_id == {node_q})\n'
+                f'  |> filter(fn: (r) => r.channel == {ch_q})\n'
+                f'  |> filter(fn: (r) => r.source == {source_q})\n'
+                f'  |> map(fn: (r) => ({{ r with _value: uint(v: r._time) }}))\n'
+                f'  |> keep(columns: ["_value"])'
+            )
+            exists = set()
+            for rec in query_api.query_stream(query=flux, org=INFLUX_ORG):
+                try:
+                    exists.add(int(rec.get_value()))
+                except Exception:
+                    continue
+            existing_by_channel[channel] = exists
+
+        # Protect add-only semantics even when export clock offset changes:
+        # dedupe by original node timestamp + sweep tick (if available).
+        for channel, rng in raw_channel_ranges.items():
+            raw_start_ns = int(rng[0])
+            raw_stop_ns = int(rng[1])
+            ch_q = json.dumps(str(channel))
+            flux = (
+                f'from(bucket: {bucket_q})\n'
+                f'  |> range(start: -3650d)\n'
+                f'  |> filter(fn: (r) => r._measurement == {measurement_q})\n'
+                f'  |> filter(fn: (r) => r._field == "node_ts_raw_ns" or r._field == "node_tick")\n'
+                f'  |> filter(fn: (r) => r.node_id == {node_q})\n'
+                f'  |> filter(fn: (r) => r.channel == {ch_q})\n'
+                f'  |> filter(fn: (r) => r.source == {source_q})\n'
+                f'  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")\n'
+                f'  |> filter(fn: (r) => exists r.node_ts_raw_ns)\n'
+                f'  |> filter(fn: (r) => r.node_ts_raw_ns >= {raw_start_ns}.0 and r.node_ts_raw_ns <= {raw_stop_ns}.0)\n'
+                f'  |> keep(columns: ["node_ts_raw_ns", "node_tick"])'
+            )
+            raw_exists = {"pairs": set(), "raws": set()}
+            for rec in query_api.query_stream(query=flux, org=INFLUX_ORG):
+                try:
+                    vals = getattr(rec, "values", {}) or {}
+                    raw_v = vals.get("node_ts_raw_ns")
+                    if raw_v is None:
+                        continue
+                    raw_i = int(float(raw_v))
+                    raw_exists["raws"].add(raw_i)
+                    tick_v = vals.get("node_tick")
+                    if tick_v is not None:
+                        try:
+                            raw_exists["pairs"].add((raw_i, int(float(tick_v))))
+                        except Exception:
+                            pass
+                except Exception:
+                    continue
+            existing_raw_by_channel[channel] = raw_exists
+
+        for channel, ts_ns, value, raw_ts_ns, tick_val in candidates:
+            exists = existing_by_channel.get(channel)
+            raw_exists = existing_raw_by_channel.get(channel)
+            if raw_exists is not None:
+                raw_i = int(raw_ts_ns)
+                if tick_val is not None and (raw_i, int(tick_val)) in raw_exists["pairs"]:
+                    total_skipped_existing += 1
+                    continue
+                if tick_val is None and raw_i in raw_exists["raws"]:
+                    total_skipped_existing += 1
+                    continue
+            if exists is not None and ts_ns in exists:
+                total_skipped_existing += 1
+                continue
+
+            point = (
+                Point(MSCL_MEASUREMENT)
+                .tag("node_id", node_tag)
+                .tag("channel", channel)
+                .tag("source", source_tag)
+                .tag("time_alignment", "node_to_host")
+                .field("value", value)
+                .field("node_ts_raw_ns", int(raw_ts_ns))
+                .field("clock_offset_ns", int(time_offset_ns))
+                .time(ts_ns, WritePrecision.NS)
+            )
+            if tick_val is not None:
+                point = point.field("node_tick", int(tick_val))
+            batch.append(point)
+            if exists is not None:
+                exists.add(ts_ns)
+            if raw_exists is not None:
+                raw_i = int(raw_ts_ns)
+                raw_exists["raws"].add(raw_i)
+                if tick_val is not None:
+                    raw_exists["pairs"].add((raw_i, int(tick_val)))
+
+            if len(batch) >= max(1, int(MSCL_EXPORT_INFLUX_BATCH)):
+                write_api.write(INFLUX_BUCKET, INFLUX_ORG, batch)
+                total_written += len(batch)
+                batch = []
+
+        if batch:
+            write_api.write(INFLUX_BUCKET, INFLUX_ORG, batch)
+            total_written += len(batch)
+
+    return {"written": int(total_written), "skipped_existing": int(total_skipped_existing)}
 
 
 def _stream_loop():
@@ -213,6 +734,12 @@ def _stream_loop():
         disconnected = True
         while True:
             try:
+                pause_until = float(getattr(state, "STREAM_PAUSE_UNTIL", 0.0) or 0.0)
+                now_ts = time.time()
+                if now_ts < pause_until:
+                    time.sleep(min(0.25, max(0.05, pause_until - now_ts)))
+                    continue
+
                 ok, _ = internal_connect()
                 if not ok or state.BASE_STATION is None:
                     metric_inc("base_reconnect_attempts")
@@ -302,7 +829,7 @@ def _stream_loop():
                         Point(MSCL_MEASUREMENT)
                         .tag("node_id", node_address)
                         .tag("channel", channel)
-                        .tag("source", "mscl_config_stream")
+                        .tag("source", MSCL_SOURCE_RADIO)
                         .field("value", value)
                         .time(t_ns, WritePrecision.NS)
                     )
@@ -577,15 +1104,81 @@ def _schedule_idle_after(node_id, seconds, token):
         ok, msg = internal_connect()
         if not ok or state.BASE_STATION is None:
             log(f"[mscl-web] [SAMPLE] auto-idle skipped node_id={node_id}: {msg}")
+            run = state.SAMPLE_RUNS.get(node_id, {})
+            run.update({
+                "auto_idle_confirmed": False,
+                "auto_idle_last_reason": msg,
+                "auto_idle_attempts": 0,
+                "auto_idle_at": int(time.time()),
+            })
+            state.SAMPLE_RUNS[node_id] = run
             return
         try:
             ensure_beacon_on()
             node = mscl.WirelessNode(node_id, state.BASE_STATION)
-            node.readWriteRetries(10)
-            node.setToIdle()
-            log(f"[mscl-web] [SAMPLE] auto-idle sent node_id={node_id} after {seconds}s")
+            node.readWriteRetries(15)
+
+            idle_status = {}
+            confirmed = False
+            attempts_done = 0
+            for attempt in range(1, 4):
+                attempts_done = attempt
+                idle_status = send_idle_sensorconnect_style(node, node_id, f"auto-idle#{attempt}")
+                if bool(idle_status.get("state_confirmed")):
+                    confirmed = True
+                    break
+                # Fallback state check when SetToIdle status polling is inconclusive.
+                try:
+                    _, st_txt, _ = _node_state_info(node)
+                    if str(st_txt or "").strip().lower() == "idle":
+                        confirmed = True
+                        idle_status = dict(idle_status or {})
+                        idle_status["state_confirmed"] = True
+                        idle_status["reason"] = "confirmed by node state"
+                        break
+                except Exception:
+                    pass
+                if attempt < 3:
+                    time.sleep(0.8 * attempt)
+
+            run = state.SAMPLE_RUNS.get(node_id, {})
+            if confirmed:
+                run.update({
+                    "state": "stopped",
+                    "stopped_at": int(time.time()),
+                    "idle_result": idle_status.get("idle_result"),
+                    "stop_reason": "auto-idle",
+                    "auto_idle_confirmed": True,
+                    "auto_idle_last_reason": idle_status.get("reason"),
+                    "auto_idle_attempts": attempts_done,
+                    "auto_idle_at": int(time.time()),
+                })
+                state.SAMPLE_RUNS[node_id] = run
+                log(
+                    f"[mscl-web] [SAMPLE] auto-idle confirmed node_id={node_id} "
+                    f"after {seconds}s attempts={attempts_done} reason={idle_status.get('reason')}"
+                )
+            else:
+                run.update({
+                    "auto_idle_confirmed": False,
+                    "auto_idle_last_reason": idle_status.get("reason"),
+                    "auto_idle_attempts": attempts_done,
+                    "auto_idle_at": int(time.time()),
+                })
+                state.SAMPLE_RUNS[node_id] = run
+                log(
+                    f"[mscl-web] [SAMPLE] auto-idle not confirmed node_id={node_id} "
+                    f"after {seconds}s attempts={attempts_done} reason={idle_status.get('reason')}"
+                )
         except Exception as e:
             log(f"[mscl-web] [SAMPLE] auto-idle failed node_id={node_id}: {e}")
+            run = state.SAMPLE_RUNS.get(node_id, {})
+            run.update({
+                "auto_idle_confirmed": False,
+                "auto_idle_last_reason": str(e),
+                "auto_idle_at": int(time.time()),
+            })
+            state.SAMPLE_RUNS[node_id] = run
 
 
 def _sampling_duration_to_seconds(duration_value, duration_units, continuous):
@@ -624,12 +1217,17 @@ def _set_sampling_mode_on_node(cfg, mode_key):
     mode_key = str(mode_key or "transmit").lower()
     mode_value = SAMPLING_MODE_MAP.get(mode_key, SAMPLING_MODE_MAP["transmit"])
     errs = []
-    for setter in (
-        lambda: cfg.dataMode(int(mode_value)),
-        lambda: cfg.dataCollectionMethod(int(mode_value)),
-    ):
+    try:
+        cfg.dataCollectionMethod(int(mode_value))
+        return mode_value, None
+    except Exception as e:
+        errs.append(str(e))
+
+    # Compatibility fallback for nodes that only expose dataMode in config.
+    # Keep this fallback for transmit only to avoid mapping log-modes to derived data.
+    if mode_key == "transmit":
         try:
-            setter()
+            cfg.dataMode(int(getattr(mscl.WirelessTypes, "dataMode_raw", 1)))
             return mode_value, None
         except Exception as e:
             errs.append(str(e))
@@ -887,9 +1485,14 @@ def _start_sampling_run(node_id, body):
             except Exception as e:
                 log(f"[mscl-web] [S-RUN] sampleRate not set node_id={node_id}: {e}")
 
-        # Do not force data mode at start; SensorConnect-style flow relies on
-        # current node mode and explicit sample rate/start commands.
-        mode_value = None
+        mode_value, mode_err = _set_sampling_mode_on_node(cfg, mode_key)
+        if mode_value is None:
+            return {
+                "success": False,
+                "error": f"Log/Transmit mode not set: {mode_err}",
+                "rate": sample_rate,
+                "mode": mode_key,
+            }
 
         apply_ok = False
         apply_err = None
@@ -930,6 +1533,12 @@ def _start_sampling_run(node_id, body):
             except Exception as e:
                 log(f"[mscl-web] [S-RUN] post-apply dataMode read failed node_id={node_id}: {e}")
             try:
+                cm = int(node.getDataCollectionMethod())
+                cm_txt = next((k for k, v in SAMPLING_MODE_MAP.items() if int(v) == cm), f"value:{cm}")
+                log(f"[mscl-web] [S-RUN] post-apply collectionMethod node_id={node_id}: {cm} ({cm_txt})")
+            except Exception as e:
+                log(f"[mscl-web] [S-RUN] post-apply collectionMethod read failed node_id={node_id}: {e}")
+            try:
                 sm = node.getSamplingMode()
                 log(f"[mscl-web] [S-RUN] post-apply samplingMode node_id={node_id}: {sm}")
             except Exception as e:
@@ -945,6 +1554,12 @@ def _start_sampling_run(node_id, body):
                 log(f"[mscl-web] [S-RUN] post-start dataMode node_id={node_id}: {dm2}")
             except Exception as e:
                 log(f"[mscl-web] [S-RUN] post-start dataMode read failed node_id={node_id}: {e}")
+            try:
+                cm2 = int(node.getDataCollectionMethod())
+                cm2_txt = next((k for k, v in SAMPLING_MODE_MAP.items() if int(v) == cm2), f"value:{cm2}")
+                log(f"[mscl-web] [S-RUN] post-start collectionMethod node_id={node_id}: {cm2} ({cm2_txt})")
+            except Exception as e:
+                log(f"[mscl-web] [S-RUN] post-start collectionMethod read failed node_id={node_id}: {e}")
             try:
                 sm2 = node.getSamplingMode()
                 log(f"[mscl-web] [S-RUN] post-start samplingMode node_id={node_id}: {sm2}")
@@ -1267,7 +1882,7 @@ def api_read(node_id):
                 except Exception:
                     active_mask = None
         
-                # 3. Остальные поля — best-effort (не ломаем чтение при EEPROM ошибках)
+                # 3. Remaining fields are best-effort (do not fail read on EEPROM errors)
                 model = cached.get("model", "TC-Link-200")
                 if refresh_eeprom or "model" not in cached:
                     try:
@@ -1791,7 +2406,7 @@ def api_read(node_id):
                 default_mode_options = _filter_default_modes_for_model(model, default_mode_options, current_default_mode)
                 tx_power_options = _tx_power_options_for_model(model, current_power)
 
-                # Частоты (если доступно)
+                # Rates (when available)
                 supported_rates = cached.get("supported_rates", [])
                 if (refresh_eeprom or not supported_rates) and current_rate is not None:
                     supported_rates = [{"enum_val": int(current_rate), "str_val": _sample_rate_label(current_rate)}]
@@ -2100,6 +2715,437 @@ def api_clear_storage(node_id):
         except Exception as e:
             log(f"[mscl-web] [CLEAR-STORAGE] failed node_id={node_id}: {e}")
             return jsonify(success=False, error=str(e))
+
+
+@app.route('/api/export_storage/<int:node_id>')
+def api_export_storage(node_id):
+    export_format = str(request.args.get("format", "csv") or "csv").strip().lower()
+    if export_format not in ("csv", "json", "none"):
+        return jsonify(success=False, error="Unsupported format. Use 'csv', 'json', or 'none'."), 400
+    ingest_influx = _query_bool("ingest_influx", True)
+    align_clock_raw = str(request.args.get("align_clock", "host") or "host").strip().lower()
+    align_clock = align_clock_raw not in ("none", "off", "false", "0", "no")
+    ui_from_raw = request.args.get("ui_from")
+    ui_to_raw = request.args.get("ui_to")
+    ui_window_from_ns = None
+    ui_window_to_ns = None
+    if ui_from_raw is not None or ui_to_raw is not None:
+        if not ui_from_raw or not ui_to_raw:
+            return jsonify(success=False, error="Both ui_from and ui_to are required"), 400
+        try:
+            ui_window_from_ns = _parse_iso_utc_to_ns(ui_from_raw, "ui_from")
+            ui_window_to_ns = _parse_iso_utc_to_ns(ui_to_raw, "ui_to")
+        except ValueError as ve:
+            return jsonify(success=False, error=str(ve)), 400
+        if int(ui_window_to_ns) <= int(ui_window_from_ns):
+            return jsonify(success=False, error="ui_to must be greater than ui_from"), 400
+    host_hours_raw = request.args.get("host_hours")
+    host_hours = None
+    if host_hours_raw is not None and str(host_hours_raw).strip() != "":
+        try:
+            host_hours = float(host_hours_raw)
+        except Exception:
+            return jsonify(success=False, error="Invalid host_hours. Use a positive number."), 400
+        if host_hours <= 0:
+            return jsonify(success=False, error="host_hours must be > 0"), 400
+
+    with state.OP_LOCK:
+        ok, msg = internal_connect()
+        if not ok or state.BASE_STATION is None:
+            return jsonify(success=False, error=f"Base station not connected: {msg}"), 503
+        try:
+            _pause_stream_reader(4.0, f"export-storage node={node_id}")
+            ensure_beacon_on()
+            base_station = state.BASE_STATION
+            if base_station is None:
+                return jsonify(success=False, error="Base station not connected"), 503
+
+            old_base_timeout = None
+            old_base_retries = None
+            try:
+                old_base_timeout = int(base_station.timeout())
+            except Exception:
+                old_base_timeout = None
+            try:
+                old_base_retries = int(base_station.readWriteRetries())
+            except Exception:
+                old_base_retries = None
+
+            # Datalog download needs much higher command timeout than default.
+            try:
+                base_station.timeout(max(int(old_base_timeout or 0), 4000))
+            except Exception:
+                pass
+            try:
+                base_station.readWriteRetries(max(int(old_base_retries or 0), 25))
+            except Exception:
+                pass
+
+            rows = []
+            sweep_count = 0
+            session_count = 0
+            last_download_err = None
+
+            try:
+                # Retry around DatalogDownloader create/session info to tolerate startup noise.
+                for attempt in range(1, 6):
+                    _pause_stream_reader(6.0, f"export-storage attempt={attempt} node={node_id}")
+                    node = mscl.WirelessNode(node_id, base_station)
+                    node.readWriteRetries(25)
+
+                    idle_status = send_idle_sensorconnect_style(node, node_id, f"before-export-storage#{attempt}")
+                    idle_confirmed = bool(idle_status.get("state_confirmed"))
+                    if not idle_confirmed:
+                        log(
+                            f"[mscl-web] [EXPORT-STORAGE] node_id={node_id}: idle not confirmed "
+                            f"before attempt {attempt}; reason={idle_status.get('reason')}"
+                        )
+
+                    settle_sec = 1.0 + (attempt * 0.5)
+                    time.sleep(settle_sec)
+
+                    try:
+                        node.ping()
+                    except Exception:
+                        pass
+
+                    session_count = None
+                    session_err = None
+                    for s_try in range(1, 4):
+                        try:
+                            session_count = int(node.getNumDatalogSessions())
+                            break
+                        except Exception as se:
+                            session_err = str(se)
+                            if "EEPROM" in session_err:
+                                metric_inc("eeprom_retries_read")
+                            log(
+                                f"[mscl-web] [EXPORT-STORAGE] getNumDatalogSessions failed "
+                                f"node_id={node_id} attempt {attempt}/5 subtry {s_try}/3: {session_err}"
+                            )
+                            time.sleep(0.5 * s_try)
+
+                    if session_count is None:
+                        last_download_err = RuntimeError(
+                            f"Failed to read datalog session count: {session_err or 'unknown error'}"
+                        )
+                        if attempt < 5:
+                            continue
+                        raise last_download_err
+
+                    if session_count <= 0:
+                        return jsonify(success=False, error="No datalog sessions on node storage"), 404
+
+                    try:
+                        downloader = mscl.DatalogDownloader(node)
+                    except Exception as create_exc:
+                        last_download_err = create_exc
+                        err_txt = str(create_exc)
+                        log(f"[mscl-web] [EXPORT-STORAGE] attempt {attempt}/5 create failed node_id={node_id}: {err_txt}")
+                        retriable = (
+                            ("Failed to get the Datalog Session Info" in err_txt)
+                            or ("Failed to get the Datalogging Session Info" in err_txt)
+                            or ("EEPROM" in err_txt)
+                        )
+                        if attempt < 5 and retriable:
+                            continue
+                        raise
+
+                    rows = []
+                    sweep_count = 0
+                    safety_loops = 0
+                    transient_errors = 0
+                    consecutive_errors = 0
+                    while not downloader.complete():
+                        safety_loops += 1
+                        if safety_loops > 20_000_000:
+                            raise RuntimeError("Download aborted: safety loop limit reached")
+
+                        try:
+                            batch = downloader.getNextData()
+                            consecutive_errors = 0
+                        except Exception as dl_step_exc:
+                            err_txt = str(dl_step_exc)
+                            retriable = (
+                                ("Failed to download data from the Node" in err_txt)
+                                or ("Failed to get the Datalog Session Info" in err_txt)
+                                or ("Failed to get the Datalogging Session Info" in err_txt)
+                                or ("EEPROM" in err_txt)
+                            )
+                            if not retriable:
+                                raise
+                            transient_errors += 1
+                            consecutive_errors += 1
+                            if transient_errors % 10 == 0:
+                                log(
+                                    f"[mscl-web] [EXPORT-STORAGE] transient errors node_id={node_id}: "
+                                    f"{transient_errors}, pct={downloader.percentComplete():.3f}, last={err_txt}"
+                                )
+                            if consecutive_errors >= 20 or transient_errors >= 400:
+                                raise RuntimeError(
+                                    f"Too many transient download errors ({transient_errors}); last={err_txt}"
+                                )
+                            time.sleep(min(1.0, 0.08 * consecutive_errors))
+                            continue
+
+                        sweeps = _coerce_logged_sweeps(batch)
+                        if not sweeps:
+                            continue
+
+                        for sweep in sweeps:
+                            sweep_count += 1
+                            try:
+                                session_index = int(downloader.sessionIndex())
+                            except Exception:
+                                session_index = None
+                            try:
+                                sample_rate_text = str(downloader.sampleRate())
+                            except Exception:
+                                sample_rate_text = ""
+                            rows.extend(_logged_sweep_rows(node_id, session_index, sample_rate_text, sweep))
+
+                        if sweep_count % 500 == 0:
+                            try:
+                                pct = float(downloader.percentComplete())
+                            except Exception:
+                                pct = -1.0
+                            log(
+                                f"[mscl-web] [EXPORT-STORAGE] progress node_id={node_id} "
+                                f"sweeps={sweep_count} points={len(rows)} pct={pct:.3f}"
+                            )
+
+                    if rows:
+                        break
+                    last_download_err = RuntimeError("No datapoints found in node datalog sessions")
+
+                if last_download_err is not None and not rows:
+                    raise last_download_err
+            finally:
+                try:
+                    if old_base_timeout is not None:
+                        base_station.timeout(int(old_base_timeout))
+                except Exception:
+                    pass
+                try:
+                    if old_base_retries is not None:
+                        base_station.readWriteRetries(int(old_base_retries))
+                except Exception:
+                    pass
+
+
+            if not rows:
+                return jsonify(success=False, error="No datapoints found in node datalog sessions"), 404
+
+            time_window_applied = False
+            time_window_from_ns = None
+            time_window_to_ns = None
+            time_window_offset_ns = 0
+            time_window_origin = None
+            if export_format in ("csv", "json"):
+                if ui_window_from_ns is not None and ui_window_to_ns is not None:
+                    time_window_from_ns = int(ui_window_from_ns)
+                    time_window_to_ns = int(ui_window_to_ns)
+                    time_window_origin = "ui"
+                elif host_hours is not None:
+                    time_window_to_ns = int(time.time_ns())
+                    time_window_from_ns = time_window_to_ns - int(host_hours * 3600.0 * 1_000_000_000)
+                    time_window_origin = "host_hours"
+
+            if time_window_from_ns is not None and time_window_to_ns is not None and export_format in ("csv", "json"):
+                time_window_offset_ns, _ = _compute_export_clock_offset_ns(
+                    rows, node_id=node_id, min_skew_sec=MSCL_EXPORT_ALIGN_MIN_SKEW_SEC
+                )
+                filtered_rows = []
+                for row in rows:
+                    try:
+                        host_ts_ns = int(row.get("timestamp_ns")) + int(time_window_offset_ns)
+                    except Exception:
+                        continue
+                    if time_window_from_ns <= host_ts_ns <= time_window_to_ns:
+                        filtered_rows.append(row)
+                rows = filtered_rows
+                time_window_applied = True
+                if not rows:
+                    return jsonify(
+                        success=False,
+                        error="No datapoints in selected time window",
+                        window_origin=time_window_origin,
+                        ui_from=ui_from_raw,
+                        ui_to=ui_to_raw,
+                        host_hours=host_hours,
+                    ), 404
+
+            backfill_written = 0
+            backfill_skipped_existing = 0
+            backfill_error = None
+            clock_offset_ns = 0
+            clock_skew_ns = 0
+            if ingest_influx:
+                try:
+                    if align_clock:
+                        clock_offset_ns, clock_skew_ns = _compute_export_clock_offset_ns(
+                            rows, node_id=node_id, min_skew_sec=MSCL_EXPORT_ALIGN_MIN_SKEW_SEC
+                        )
+                    bf_stats = _backfill_rows_to_influx_stream(
+                        node_id=node_id,
+                        rows=rows,
+                        time_offset_ns=clock_offset_ns,
+                        source_tag=MSCL_SOURCE_NODE_EXPORT,
+                    )
+                    backfill_written = int(bf_stats.get("written", 0))
+                    backfill_skipped_existing = int(bf_stats.get("skipped_existing", 0))
+                    metric_inc("stream_write_calls")
+                    metric_inc("stream_points_written", backfill_written)
+                    log(
+                        f"[mscl-web] [EXPORT-STORAGE] backfill node_id={node_id} "
+                        f"written={backfill_written} skipped_existing={backfill_skipped_existing} "
+                        f"offset_ns={clock_offset_ns} skew_ns={clock_skew_ns}"
+                    )
+                except Exception as bf_exc:
+                    backfill_error = str(bf_exc)
+                    log(
+                        f"[mscl-web] [EXPORT-STORAGE] backfill failed node_id={node_id}: {backfill_error}"
+                    )
+
+            exported_at = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            base_name = f"node_{node_id}_datalog_{exported_at}"
+            log(
+                f"[mscl-web] [EXPORT-STORAGE] success node_id={node_id} "
+                f"sessions={session_count} sweeps={sweep_count} points={len(rows)} "
+                f"format={export_format} ingest_influx={ingest_influx} "
+                f"backfill_written={backfill_written} backfill_skipped_existing={backfill_skipped_existing} "
+                f"time_window_applied={time_window_applied} time_window_origin={time_window_origin} "
+                f"time_window_offset_ns={int(time_window_offset_ns)} "
+                f"host_hours={host_hours} ui_from={ui_from_raw} ui_to={ui_to_raw}"
+            )
+
+            def _attach_export_headers(resp):
+                resp.headers["X-Influx-Backfill-Written"] = str(int(backfill_written))
+                resp.headers["X-Influx-Backfill-Skipped-Existing"] = str(int(backfill_skipped_existing))
+                resp.headers["X-Influx-Clock-Offset-Ns"] = str(int(clock_offset_ns))
+                resp.headers["X-Influx-Clock-Skew-Ns"] = str(int(clock_skew_ns))
+                if time_window_applied:
+                    if time_window_origin:
+                        resp.headers["X-Time-Window-Origin"] = str(time_window_origin)
+                    if time_window_from_ns is not None:
+                        resp.headers["X-Time-Window-From-Ns"] = str(int(time_window_from_ns))
+                    if time_window_to_ns is not None:
+                        resp.headers["X-Time-Window-To-Ns"] = str(int(time_window_to_ns))
+                    if ui_from_raw:
+                        resp.headers["X-UI-Window-From"] = str(ui_from_raw)
+                    if ui_to_raw:
+                        resp.headers["X-UI-Window-To"] = str(ui_to_raw)
+                    if host_hours is not None:
+                        resp.headers["X-Host-Window-Hours"] = str(host_hours)
+                    resp.headers["X-Time-Window-Offset-Ns"] = str(int(time_window_offset_ns))
+                if backfill_error:
+                    resp.headers["X-Influx-Backfill-Error"] = str(backfill_error)[:180]
+                return resp
+
+            if export_format == "json":
+                payload = {
+                    "node_id": int(node_id),
+                    "exported_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ"),
+                    "session_count": int(session_count),
+                    "sweep_count": int(sweep_count),
+                    "point_count": int(len(rows)),
+                    "ingest_influx": bool(ingest_influx),
+                    "backfill_written": int(backfill_written),
+                    "backfill_skipped_existing": int(backfill_skipped_existing),
+                    "clock_offset_ns": int(clock_offset_ns),
+                    "clock_skew_ns": int(clock_skew_ns),
+                    "backfill_error": backfill_error,
+                    "time_window_applied": bool(time_window_applied),
+                    "time_window_origin": time_window_origin,
+                    "ui_from": ui_from_raw,
+                    "ui_to": ui_to_raw,
+                    "host_hours": host_hours,
+                    "time_window_offset_ns": int(time_window_offset_ns),
+                    "rows": rows,
+                }
+                body = json.dumps(payload, ensure_ascii=False)
+                resp = Response(
+                    body,
+                    mimetype="application/json",
+                    headers={"Content-Disposition": f"attachment; filename={base_name}.json"},
+                )
+                return _attach_export_headers(resp)
+
+            if export_format == "none":
+                if ingest_influx and backfill_error:
+                    return jsonify(
+                        success=False,
+                        error=f"Export to Influx failed: {backfill_error}",
+                        node_id=int(node_id),
+                        session_count=int(session_count),
+                        sweep_count=int(sweep_count),
+                        point_count=int(len(rows)),
+                        backfill_written=int(backfill_written),
+                        backfill_skipped_existing=int(backfill_skipped_existing),
+                        clock_offset_ns=int(clock_offset_ns),
+                        clock_skew_ns=int(clock_skew_ns),
+                    ), 502
+                return jsonify(
+                    success=True,
+                    node_id=int(node_id),
+                    session_count=int(session_count),
+                    sweep_count=int(sweep_count),
+                    point_count=int(len(rows)),
+                    ingest_influx=bool(ingest_influx),
+                    backfill_written=int(backfill_written),
+                    backfill_skipped_existing=int(backfill_skipped_existing),
+                    clock_offset_ns=int(clock_offset_ns),
+                    clock_skew_ns=int(clock_skew_ns),
+                    backfill_error=backfill_error,
+                    time_window_applied=bool(time_window_applied),
+                    time_window_origin=time_window_origin,
+                    ui_from=ui_from_raw,
+                    ui_to=ui_to_raw,
+                    host_hours=host_hours,
+                    time_window_offset_ns=int(time_window_offset_ns),
+                )
+
+            csv_columns = [
+                "timestamp_utc",
+                "timestamp_ns",
+                "node_id",
+                "session_index",
+                "sample_rate",
+                "channel",
+                "channel_id",
+                "value",
+                "tick",
+                "cal_applied",
+            ]
+            csv_buf = io.StringIO()
+            writer = csv.DictWriter(csv_buf, fieldnames=csv_columns)
+            writer.writeheader()
+            writer.writerows(rows)
+            csv_bytes = csv_buf.getvalue().encode("utf-8")
+            resp = send_file(
+                io.BytesIO(csv_bytes),
+                mimetype="text/csv; charset=utf-8",
+                as_attachment=True,
+                download_name=f"{base_name}.csv",
+            )
+            return _attach_export_headers(resp)
+        except Exception as e:
+            err = str(e)
+            if (
+                "Failed to download data from the Node" in err
+                or "Failed to get the Datalog Session Info" in err
+                or "Failed to get the Datalogging Session Info" in err
+                or "EEPROM" in err
+            ):
+                friendly = (
+                    "Node datalog session info is unstable (MSCL read error). "
+                    "Try: stop sampling -> set Idle -> wait 5-10s -> retry export."
+                )
+                log(f"[mscl-web] [EXPORT-STORAGE] failed node_id={node_id}: {err} | hint={friendly}")
+                return jsonify(success=False, error=friendly), 409
+            log(f"[mscl-web] [EXPORT-STORAGE] failed node_id={node_id}: {err}")
+            return jsonify(success=False, error=err), 500
+
 
 @app.route('/api/write', methods=['POST'])
 def api_write():

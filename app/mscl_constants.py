@@ -185,9 +185,9 @@ PRIMARY_UNIT_ORDER = ["Ohm", "Milliohm", "Kiloohm"]
 TEMP_UNIT_ORDER = ["Celsius", "Fahrenheit", "Kelvin"]
 
 SAMPLING_MODE_MAP = {
-    "log": 2,
-    "transmit": 1,
-    "log_and_transmit": 3,
+    "log": int(getattr(mscl.WirelessTypes, "collectionMethod_logOnly", 1)),
+    "transmit": int(getattr(mscl.WirelessTypes, "collectionMethod_transmitOnly", 2)),
+    "log_and_transmit": int(getattr(mscl.WirelessTypes, "collectionMethod_logAndTransmit", 3)),
 }
 SAMPLING_MODE_LABELS = {
     "log": "Log",

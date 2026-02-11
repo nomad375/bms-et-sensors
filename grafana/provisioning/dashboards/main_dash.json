@@ -200,11 +200,98 @@
             "type": "influxdb",
             "uid": "InfluxDB_Flux"
           },
-          "query": "from(bucket: \"daq_data\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"mscl_sensors\")\n  |> filter(fn: (r) => r[\"_field\"] == \"value\")\n  |> filter(fn: (r) => r[\"channel\"] == \"ch1\")\n  |> map(fn: (r) => ({ r with _value: 1000000.0 / (0.32333116 * r._value) }))\n  |> yield(name: \"raw\")",
+          "query": "from(bucket: \"daq_data\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"mscl_sensors\")\n  |> filter(fn: (r) => r[\"_field\"] == \"value\")\n  |> filter(fn: (r) => r[\"source\"] == \"mscl_config_stream\")\n  |> filter(fn: (r) => r[\"channel\"] == \"ch1\")\n  |> map(fn: (r) => ({ r with _value: 1000000.0 / (0.32333116 * r._value) }))\n  |> yield(name: \"radio\")",
           "refId": "A"
         }
       ],
-      "title": "MicroStrain Sensor Data",
+      "title": "MicroStrain Sensor Data (Radio Stream)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "InfluxDB_Flux"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "newton"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 28
+      },
+      "id": 4,
+      "maxDataPoints": 20000,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "InfluxDB_Flux"
+          },
+          "query": "from(bucket: \"daq_data\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"mscl_sensors\")\n  |> filter(fn: (r) => r[\"_field\"] == \"value\")\n  |> filter(fn: (r) => r[\"source\"] == \"mscl_node_export\")\n  |> filter(fn: (r) => r[\"channel\"] == \"ch1\")\n  |> map(fn: (r) => ({ r with _value: 1000000.0 / (0.32333116 * r._value) }))\n  |> yield(name: \"node_export\")",
+          "refId": "A"
+        }
+      ],
+      "title": "MicroStrain Sensor Data (Node Export Stream)",
       "type": "timeseries"
     }
   ],
@@ -220,9 +307,9 @@
     "to": "now"
   },
   "timepicker": {},
-  "timezone": "",
+  "timezone": "browser",
   "title": "RedLab & MSCL Dashboard",
   "uid": "redlab_pro_dash",
-  "version": 10,
+  "version": 11,
   "weekStart": ""
 }

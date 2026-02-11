@@ -1,6 +1,6 @@
 FROM python:3.12-slim
 
-# 1. Системные зависимости
+# 1. System dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget ca-certificates libbluetooth3 libboost-system-dev \
     libboost-filesystem-dev libboost-program-options-dev libboost-python-dev \
@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /tmp
 
-# 2. Установка MSCL по прямым ссылкам
+# 2. Install MSCL via direct links
 RUN ARCH=$(uname -m) && \
     if [ "$ARCH" = "x86_64" ]; then \
         MSCL_URL="https://github.com/LORD-MicroStrain/MSCL/releases/download/latest/MSCL-Python3.12-x86_64-v68.1.0.deb"; \
@@ -19,7 +19,7 @@ RUN ARCH=$(uname -m) && \
     dpkg -i mscl.deb || apt-get install -f -y && \
     rm mscl.deb
 
-# 3. Настройка окружения
+# 3. Environment setup
 ENV PYTHONPATH="${PYTHONPATH}:/usr/lib/python3.12/dist-packages"
 ENV PYTHONUNBUFFERED=1
 
