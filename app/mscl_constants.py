@@ -1,18 +1,60 @@
 import sys
+import re
 
 mscl_path = '/usr/lib/python3.12/dist-packages'
 if mscl_path not in sys.path:
     sys.path.append(mscl_path)
 import MSCL as mscl  # type: ignore
 
-RATE_MAP = {
-    106: "1 Hz", 107: "2 Hz", 108: "4 Hz", 109: "8 Hz",
-    110: "16 Hz", 111: "32 Hz", 112: "64 Hz", 113: "128 Hz",
-    114: "256 Hz", 115: "512 Hz", 116: "1 kHz", 117: "2 kHz",
-    118: "4 kHz", 119: "8 kHz", 120: "16 kHz", 121: "32 kHz",
-    122: "64 kHz", 123: "128 kHz"
-}
-TC_LINK_200_RATE_ENUMS = {106, 107, 108, 109, 110, 111, 112, 113}
+def _build_rate_map():
+    # Read sample-rate enums from installed MSCL to avoid hardcoded mismatch
+    # across MSCL versions (enum ids are not guaranteed stable).
+    def _label_from_name(name):
+        if not name.startswith("sampleRate_"):
+            return None
+        suffix = name.split("sampleRate_", 1)[1]
+
+        m = re.fullmatch(r"(\d+)kHz", suffix)
+        if m:
+            return f"{int(m.group(1))} kHz"
+
+        m = re.fullmatch(r"(\d+)Hz", suffix)
+        if m:
+            return f"{int(m.group(1))} Hz"
+
+        m = re.fullmatch(r"(\d+)Sec", suffix)
+        if m:
+            n = int(m.group(1))
+            return f"every {n} second" + ("" if n == 1 else "s")
+
+        m = re.fullmatch(r"(\d+)Min", suffix)
+        if m:
+            n = int(m.group(1))
+            return f"every {n} minute" + ("" if n == 1 else "s")
+
+        m = re.fullmatch(r"(\d+)Hours?", suffix)
+        if m:
+            n = int(m.group(1))
+            return f"every {n} hour" + ("" if n == 1 else "s")
+
+        return None
+
+    out = {}
+    for name in dir(mscl.WirelessTypes):
+        if not name.startswith("sampleRate_"):
+            continue
+        label = _label_from_name(name)
+        if not label:
+            continue
+        try:
+            out[int(getattr(mscl.WirelessTypes, name))] = label
+        except Exception:
+            continue
+    return out
+
+
+RATE_MAP = _build_rate_map()
+TC_LINK_200_RATE_ENUMS = {rid for rid, lbl in RATE_MAP.items() if lbl in {"1 Hz", "2 Hz", "4 Hz", "8 Hz", "16 Hz", "32 Hz", "64 Hz", "128 Hz"}}
 COMM_PROTOCOL_MAP = {
     0: "LXRS",
     1: "LXRS+",
@@ -30,6 +72,9 @@ INPUT_RANGE_LABELS = {
     101: "+/-625 mV or 0 to 3333.3 ohms (Gain: 4)",
     102: "+/-312.5 mV or 0 to 1428.6 ohms (Gain: 8)",
     103: "+/-156.25 mV or 0 to 666.67 ohms (Gain: 16)",
+    104: "+/-78.125 mV or 0 to 322.58 ohms (Gain: 32)",
+    105: "+/-39.0625 mV or 0 to 158.73 ohms (Gain: 64)",
+    106: "+/-19.5313 mV or 0 to 78.74 ohms (Gain: 128)",
     0: "+/-14.545 mV",
     1: "+/-10.236 mV",
     2: "+/-7.608 mV",
@@ -52,7 +97,7 @@ DEFAULT_MODE_LABELS = {
     0: "Idle",
     1: "Low Duty Cycle",
     5: "Sleep",
-    6: "Sample (Sync)",
+    6: "Sample",
 }
 DATA_MODE_LABELS = {
     1: "Live Radio",

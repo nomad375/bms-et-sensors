@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from flask import Flask, render_template, request, jsonify  # type: ignore
 from influxdb_client import InfluxDBClient, Point  # type: ignore
 from influxdb_client.client.write_api import ASYNCHRONOUS, WriteOptions  # type: ignore
+from influxdb_client.domain.write_precision import WritePrecision  # type: ignore
 
 from mscl_constants import (
     COMM_PROTOCOL_MAP,
@@ -111,6 +112,23 @@ def _point_value(dp):
     return None
 
 
+def _point_time_ns(dp):
+    """Best-effort datapoint timestamp in unix ns, with current-time fallback."""
+    try:
+        ts = dp.as_Timestamp()
+        sec = int(ts.seconds())
+        nsec = int(ts.nanoseconds())
+        if sec > 0:
+            if nsec < 0:
+                nsec = 0
+            elif nsec > 999_999_999:
+                nsec = 999_999_999
+            return sec * 1_000_000_000 + nsec
+    except Exception:
+        pass
+    return time.time_ns()
+
+
 def _stream_loop():
     if not MSCL_STREAM_ENABLED:
         log("[mscl-stream] Disabled via MSCL_STREAM_ENABLED")
@@ -152,6 +170,20 @@ def _stream_loop():
         last_batch_log_ts = now_ts
         channels_txt = ", ".join(f"{k}:{v}" for k, v in sorted(channel_counts.items()))
         log(f"[mscl-stream] Logged {point_count} points ({channels_txt})")
+
+    def _packet_rate_label(packet):
+        for getter in (
+            lambda: packet.sampleRate().prettyStr(),
+            lambda: packet.sampleRate().toString(),
+            lambda: str(packet.sampleRate()),
+        ):
+            try:
+                s = str(getter()).strip()
+                if s:
+                    return s
+            except Exception:
+                continue
+        return "unknown"
 
     def _maybe_log_drop(now_ts):
         nonlocal last_drop_log_ts
@@ -244,8 +276,12 @@ def _stream_loop():
 
             points = []
             channel_counts = {}
+            packet_rate_counts = {}
+            point_key_counts = {}
             for packet in packets:
                 node_address = str(packet.nodeAddress())
+                rate_lbl = _packet_rate_label(packet)
+                packet_rate_counts[rate_lbl] = packet_rate_counts.get(rate_lbl, 0) + 1
                 for dp in packet.data():
                     channel = _point_channel(dp)
                     if MSCL_ONLY_CHANNEL_1 and channel not in ("channel_1", "ch1"):
@@ -255,12 +291,20 @@ def _stream_loop():
                         continue
                     if channel.startswith("diagnostic_"):
                         _note_diag(channel, value)
+                    t_ns = _point_time_ns(dp)
+                    # Avoid overwriting points that share identical timestamp/tag set.
+                    key = (node_address, channel, t_ns)
+                    dup_idx = point_key_counts.get(key, 0)
+                    point_key_counts[key] = dup_idx + 1
+                    if dup_idx:
+                        t_ns += dup_idx
                     point = (
                         Point(MSCL_MEASUREMENT)
                         .tag("node_id", node_address)
                         .tag("channel", channel)
                         .tag("source", "mscl_config_stream")
                         .field("value", value)
+                        .time(t_ns, WritePrecision.NS)
                     )
                     points.append(point)
                     channel_counts[channel] = channel_counts.get(channel, 0) + 1
@@ -272,6 +316,9 @@ def _stream_loop():
                 metric_inc("stream_write_calls")
                 metric_inc("stream_points_written", len(points))
                 _maybe_log_batch(time.time(), channel_counts, len(points))
+                if packet_rate_counts:
+                    rate_txt = ", ".join(f"{k}:{v}" for k, v in sorted(packet_rate_counts.items()))
+                    log(f"[mscl-stream] Packet rates ({rate_txt})")
             _maybe_log_drop(time.time())
 
         except Exception as e:
@@ -378,22 +425,147 @@ def _start_sampling_best_effort(node, node_id):
             log(f"[mscl-web] [SAMPLE] startSyncSampling sent node_id={node_id}")
             return "sync"
     except Exception as e:
+        log(f"[mscl-web] [SAMPLE] startSyncSampling failed node_id={node_id}: {e}")
         errors.append(f"startSync={e}")
-    try:
-        if callable(getattr(node, "resendStartSyncSampling", None)):
-            node.resendStartSyncSampling()
-            log(f"[mscl-web] [SAMPLE] resendStartSyncSampling sent node_id={node_id}")
-            return "sync-resend"
-    except Exception as e:
-        errors.append(f"resendSync={e}")
     try:
         if callable(getattr(node, "startNonSyncSampling", None)):
             node.startNonSyncSampling()
             log(f"[mscl-web] [SAMPLE] startNonSyncSampling sent node_id={node_id}")
             return "non-sync"
     except Exception as e:
+        log(f"[mscl-web] [SAMPLE] startNonSyncSampling failed node_id={node_id}: {e}")
         errors.append(f"non-sync={e}")
+    try:
+        if callable(getattr(node, "resendStartSyncSampling", None)):
+            node.resendStartSyncSampling()
+            log(f"[mscl-web] [SAMPLE] resendStartSyncSampling sent node_id={node_id}")
+            return "sync-resend"
+    except Exception as e:
+        log(f"[mscl-web] [SAMPLE] resendStartSyncSampling failed node_id={node_id}: {e}")
+        errors.append(f"resendSync={e}")
     raise RuntimeError("; ".join(errors) if errors else "No sampling start method available")
+
+
+def _start_sampling_via_sync_network(node, node_id):
+    """Prefer SensorConnect-like sync network start when available."""
+    errors = []
+    sync_cls = getattr(mscl, "SyncSamplingNetwork", None)
+    if sync_cls is None:
+        raise RuntimeError("SyncSamplingNetwork is not available in MSCL")
+
+    def _mk():
+        return sync_cls(state.BASE_STATION)
+
+    def _try(label, fn):
+        try:
+            fn()
+            log(f"[mscl-web] [SAMPLE] {label} sent node_id={node_id}")
+            return True
+        except Exception as e:
+            errors.append(f"{label}={e}")
+            log(f"[mscl-web] [SAMPLE] {label} failed node_id={node_id}: {e}")
+            return False
+
+    # Attempt 1: standard network apply + start.
+    def _a1():
+        net = _mk()
+        try:
+            cached = state.NODE_READ_CACHE.get(int(node_id), {})
+            cp = int(cached.get("comm_protocol")) if isinstance(cached, dict) and cached.get("comm_protocol") is not None else None
+            if cp is None:
+                try:
+                    cp = int(node.communicationProtocol())
+                except Exception:
+                    cp = 1
+            net.communicationProtocol(int(cp))
+            log(f"[mscl-web] [SAMPLE] sync-network set commProtocol node_id={node_id}: {cp}")
+        except Exception as e:
+            log(f"[mscl-web] [SAMPLE] sync-network set commProtocol failed node_id={node_id}: {e}")
+        try:
+            net.lossless(True)
+            log(f"[mscl-web] [SAMPLE] sync-network set lossless node_id={node_id}: True")
+        except Exception as e:
+            log(f"[mscl-web] [SAMPLE] sync-network set lossless failed node_id={node_id}: {e}")
+        net.addNode(node)
+        try:
+            net.refresh()
+        except Exception:
+            pass
+        net.applyConfiguration()
+        try:
+            net_ok = bool(net.ok()) if callable(getattr(net, "ok", None)) else None
+            net_bw = float(net.percentBandwidth()) if callable(getattr(net, "percentBandwidth", None)) else None
+            ninfo = None
+            try:
+                ninfo = net.getNodeNetworkInfo(int(node_id))
+            except Exception:
+                ninfo = None
+            if ninfo is not None:
+                try:
+                    ns = int(ninfo.status())
+                except Exception:
+                    ns = None
+                try:
+                    nbw = float(ninfo.percentBandwidth())
+                except Exception:
+                    nbw = None
+                try:
+                    tdma = int(ninfo.tdmaAddress())
+                except Exception:
+                    tdma = None
+                log(
+                    f"[mscl-web] [SAMPLE] sync-network info node_id={node_id}: "
+                    f"net_ok={net_ok} net_bw={net_bw} node_status={ns} node_bw={nbw} tdma={tdma}"
+                )
+            else:
+                log(f"[mscl-web] [SAMPLE] sync-network info node_id={node_id}: net_ok={net_ok} net_bw={net_bw}")
+        except Exception as e:
+            log(f"[mscl-web] [SAMPLE] sync-network info read failed node_id={node_id}: {e}")
+        try:
+            if callable(getattr(net, "ok", None)) and (not bool(net.ok())):
+                raise RuntimeError("SyncSamplingNetwork not OK after applyConfiguration")
+        except Exception:
+            raise
+        net.startSampling()
+
+    if _try("sync-network(startSampling)", _a1):
+        return "sync-network"
+
+    # Attempt 2: start without beacon path.
+    def _a2():
+        net = _mk()
+        try:
+            cached = state.NODE_READ_CACHE.get(int(node_id), {})
+            cp = int(cached.get("comm_protocol")) if isinstance(cached, dict) and cached.get("comm_protocol") is not None else None
+            if cp is None:
+                try:
+                    cp = int(node.communicationProtocol())
+                except Exception:
+                    cp = 1
+            net.communicationProtocol(int(cp))
+        except Exception:
+            pass
+        try:
+            net.lossless(True)
+        except Exception:
+            pass
+        net.addNode(node)
+        try:
+            net.refresh()
+        except Exception:
+            pass
+        net.applyConfiguration()
+        try:
+            if callable(getattr(net, "ok", None)) and (not bool(net.ok())):
+                raise RuntimeError("SyncSamplingNetwork not OK after applyConfiguration")
+        except Exception:
+            raise
+        net.startSampling_noBeacon()
+
+    if _try("sync-network(startSampling_noBeacon)", _a2):
+        return "sync-network-no-beacon"
+
+    raise RuntimeError("; ".join(errors) if errors else "SyncSamplingNetwork start failed")
 
 def _schedule_idle_after(node_id, seconds, token):
     if seconds <= 0:
@@ -469,29 +641,172 @@ def _is_tc_link_200_model(model):
     return ("tc-link-200" in s) or s.startswith("63104100")
 
 
-def _filter_sample_rates_for_model(model, supported_rates, current_rate):
-    rates = list(supported_rates or [])
-    if not _is_tc_link_200_model(model):
-        return rates
+def _rate_label_to_hz(label):
+    s = str(label or "").strip().lower()
+    if "hz" not in s:
+        return None
+    parts = s.split()
+    if not parts:
+        return None
+    try:
+        v = float(parts[0])
+    except Exception:
+        return None
+    if "khz" in s:
+        return v * 1000.0
+    return v
 
-    filtered = []
-    for r in rates:
+
+def _rate_label_to_interval_seconds(label):
+    s = str(label or "").strip().lower()
+    if not s.startswith("every "):
+        return None
+    parts = s.split()
+    if len(parts) < 3:
+        return None
+    try:
+        v = float(parts[1])
+    except Exception:
+        return None
+    unit = parts[2]
+    if unit.startswith("second"):
+        return v
+    if unit.startswith("minute"):
+        return v * 60.0
+    if unit.startswith("hour"):
+        return v * 3600.0
+    return None
+
+
+def _filter_sample_rates_for_model(model, supported_rates, current_rate):
+    rates = []
+    seen = set()
+    for r in list(supported_rates or []):
         try:
             rid = int(r.get("enum_val"))
         except Exception:
             continue
-        if rid in TC_LINK_200_RATE_ENUMS:
-            filtered.append(r)
+        if rid in seen:
+            continue
+        seen.add(rid)
+        rates.append({"enum_val": rid, "str_val": str(r.get("str_val") or RATE_MAP.get(rid, f"Value {rid}"))})
 
-    # Keep currently reported rate visible even if it is outside filtered list.
+    def _allowed_tc200_oem(rate_item):
+        allowed_interval_sec = {2, 5, 10, 30, 60, 120, 300, 600, 1800, 3600}
+        try:
+            rid = int(rate_item.get("enum_val"))
+        except Exception:
+            rid = None
+        lbl = str(rate_item.get("str_val") or "").strip()
+        hz = _rate_label_to_hz(lbl)
+        interval_sec = _rate_label_to_interval_seconds(lbl)
+        if rid is not None and rid in TC_LINK_200_RATE_ENUMS:
+            return True
+        if hz is not None and hz <= 128.0:
+            return True
+        if interval_sec is not None and int(interval_sec) in allowed_interval_sec:
+            return True
+        return False
+
+    if _is_tc_link_200_model(model):
+        rates = [x for x in rates if _allowed_tc200_oem(x)]
+        rates.sort(
+            key=lambda x: (
+                0 if _rate_label_to_hz(x.get("str_val")) is not None else (1 if _rate_label_to_interval_seconds(x.get("str_val")) is not None else 2),
+                -(_rate_label_to_hz(x.get("str_val")) or 0.0),
+                _rate_label_to_interval_seconds(x.get("str_val")) or 0.0,
+                str(x.get("str_val") or ""),
+            )
+        )
+
+    # Keep currently reported rate visible even if it is outside list from features.
     if current_rate is not None:
         try:
             cur = int(current_rate)
-            if all(int(x.get("enum_val")) != cur for x in filtered):
-                filtered.insert(0, {"enum_val": cur, "str_val": RATE_MAP.get(cur, f"{cur} (current)")})
+            cur_item = {"enum_val": cur, "str_val": RATE_MAP.get(cur, f"Value {cur}")}
+            if _is_tc_link_200_model(model) and not _allowed_tc200_oem(cur_item):
+                return rates
+            if all(int(x.get("enum_val")) != cur for x in rates if x.get("enum_val") is not None):
+                rates.insert(0, cur_item)
         except Exception:
             pass
-    return filtered
+    return rates
+
+
+def _sample_rate_label(rate_enum, rate_obj=None):
+    try:
+        rid = int(rate_enum)
+    except Exception:
+        rid = None
+
+    # Prefer MSCL object text when available (e.g. "every 30 seconds"),
+    # but ignore plain numeric echoes like "107".
+    txt = str(rate_obj if rate_obj is not None else "").strip()
+    if txt and txt.lower() not in ("none", "null"):
+        txt_l = txt.lower()
+        numeric_echo = False
+        if rid is not None:
+            try:
+                numeric_echo = int(float(txt_l)) == rid and txt_l.replace(".", "", 1).isdigit()
+            except Exception:
+                numeric_echo = False
+        if not numeric_echo:
+            return txt
+
+    if rid is not None and rid in RATE_MAP:
+        return RATE_MAP[rid]
+    if rid is not None:
+        return f"Value {rid}"
+    return "N/A"
+
+
+def _is_tc_link_200_oem_model(model):
+    return "tc-link-200-oem" in str(model or "").strip().lower()
+
+
+def _filter_default_modes_for_model(model, default_mode_options, current_default_mode=None):
+    opts = []
+    for item in list(default_mode_options or []):
+        try:
+            vi = int(item.get("value"))
+        except Exception:
+            continue
+        label = str(item.get("label") or DEFAULT_MODE_LABELS.get(vi, f"Value {vi}"))
+        if vi == 6:
+            label = "Sample"
+        opts.append({"value": vi, "label": label})
+
+    if _is_tc_link_200_oem_model(model):
+        allowed = {0, 5, 6}
+        opts = [x for x in opts if int(x.get("value")) in allowed]
+        order = {0: 0, 5: 1, 6: 2}
+        opts.sort(key=lambda x: order.get(int(x.get("value")), 99))
+
+    if current_default_mode is not None:
+        try:
+            cur = int(current_default_mode)
+            if all(int(x.get("value")) != cur for x in opts):
+                label = "Sample" if cur == 6 else DEFAULT_MODE_LABELS.get(cur, f"Value {cur}")
+                opts.insert(0, {"value": cur, "label": label})
+        except Exception:
+            pass
+    return opts
+
+
+def _tx_power_options_for_model(model, current_power=None):
+    base = [16, 10, 5, 0]
+    if _is_tc_link_200_oem_model(model):
+        base = [10, 5, 0]
+
+    opts = [{"value": p, "label": f"{p} dBm"} for p in base]
+    if current_power is not None:
+        try:
+            cur = int(current_power)
+            if all(int(x.get("value")) != cur for x in opts):
+                opts.insert(0, {"value": cur, "label": f"{cur} dBm"})
+        except Exception:
+            pass
+    return opts
 
 
 def _start_sampling_run(node_id, body):
@@ -500,7 +815,8 @@ def _start_sampling_run(node_id, body):
         return {"success": False, "error": f"Base station not connected: {msg}"}
 
     mode_key = str(body.get("log_transmit_mode") or "transmit").lower()
-    data_type = str(body.get("data_type") or "float").lower()
+    # Current product scope: keep only float/raw sampling payload type.
+    data_type = "float"
     continuous = bool(body.get("continuous", False))
     duration_value = body.get("duration_value", 60)
     duration_units = body.get("duration_units", "seconds")
@@ -524,6 +840,44 @@ def _start_sampling_run(node_id, body):
             cfg.samplingMode(mscl.WirelessTypes.samplingMode_sync)
         except Exception:
             pass
+        try:
+            cfg.unlimitedDuration(True)
+        except Exception:
+            pass
+        # Preserve active channels for runtime start; default config may enable
+        # extra channels and reduce max supported sample rate on this node.
+        try:
+            active_mask = mscl.ChannelMask()
+            enabled = []
+            cached = state.NODE_READ_CACHE.get(int(node_id), {})
+            ch_list = cached.get("channels") if isinstance(cached, dict) else None
+            if isinstance(ch_list, list) and ch_list:
+                for ch in ch_list:
+                    try:
+                        cid = int(ch.get("id"))
+                        cen = bool(ch.get("enabled"))
+                    except Exception:
+                        continue
+                    if cen and cid in (1, 2):
+                        enabled.append(cid)
+            if not enabled:
+                try:
+                    cur_mask = node.getActiveChannels()
+                    for cid in (1, 2):
+                        try:
+                            if cur_mask.enabled(cid):
+                                enabled.append(cid)
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+            if not enabled:
+                enabled = [1]
+            for cid in enabled:
+                active_mask.enable(int(cid))
+            cfg.activeChannels(active_mask)
+        except Exception as e:
+            log(f"[mscl-web] [S-RUN] activeChannels not set node_id={node_id}: {e}")
 
         sample_rate_set = False
         if sample_rate is not None:
@@ -533,19 +887,78 @@ def _start_sampling_run(node_id, body):
             except Exception as e:
                 log(f"[mscl-web] [S-RUN] sampleRate not set node_id={node_id}: {e}")
 
-        mode_value, mode_err = _set_sampling_mode_on_node(cfg, mode_key)
-        if mode_value is None:
-            log(f"[mscl-web] [S-RUN] mode not set node_id={node_id}: {mode_err}")
+        # Do not force data mode at start; SensorConnect-style flow relies on
+        # current node mode and explicit sample rate/start commands.
+        mode_value = None
 
         apply_ok = False
+        apply_err = None
         try:
-            node.applyConfig(cfg)
-            apply_ok = True
-        except Exception as e:
-            # Keep behavior permissive: if apply fails, try start anyway.
-            log(f"[mscl-web] [S-RUN] applyConfig warning node_id={node_id}: {e}")
+            # SensorConnect-like flow:
+            # 1) verify/apply node config
+            # 2) add node to sync network
+            # 3) apply network configuration
+            # 4) start network sampling
+            try:
+                issues = mscl.ConfigIssues()
+                if not node.verifyConfig(cfg, issues):
+                    issue_texts = []
+                    try:
+                        for issue in issues:
+                            issue_texts.append(str(issue.description()))
+                    except Exception:
+                        pass
+                    joined = "; ".join([t for t in issue_texts if t]) or "verifyConfig returned false"
+                    return {
+                        "success": False,
+                        "error": f"Sampling config verify failed: {joined}",
+                        "rate": sample_rate,
+                        "mode": mode_key,
+                    }
+            except Exception as e:
+                log(f"[mscl-web] [S-RUN] verifyConfig warning node_id={node_id}: {e}")
 
-        start_mode = _start_sampling_best_effort(node, node_id)
+            node.applyConfig(cfg)
+            try:
+                eff_rate = int(node.getSampleRate())
+                log(f"[mscl-web] [S-RUN] post-apply sampleRate node_id={node_id}: {eff_rate} ({RATE_MAP.get(eff_rate, 'unknown')})")
+            except Exception as e:
+                log(f"[mscl-web] [S-RUN] post-apply sampleRate read failed node_id={node_id}: {e}")
+            try:
+                dm = int(node.getDataMode())
+                log(f"[mscl-web] [S-RUN] post-apply dataMode node_id={node_id}: {dm}")
+            except Exception as e:
+                log(f"[mscl-web] [S-RUN] post-apply dataMode read failed node_id={node_id}: {e}")
+            try:
+                sm = node.getSamplingMode()
+                log(f"[mscl-web] [S-RUN] post-apply samplingMode node_id={node_id}: {sm}")
+            except Exception as e:
+                log(f"[mscl-web] [S-RUN] post-apply samplingMode read failed node_id={node_id}: {e}")
+            start_mode = _start_sampling_via_sync_network(node, node_id)
+            try:
+                eff_rate2 = int(node.getSampleRate())
+                log(f"[mscl-web] [S-RUN] post-start sampleRate node_id={node_id}: {eff_rate2} ({RATE_MAP.get(eff_rate2, 'unknown')})")
+            except Exception as e:
+                log(f"[mscl-web] [S-RUN] post-start sampleRate read failed node_id={node_id}: {e}")
+            try:
+                dm2 = int(node.getDataMode())
+                log(f"[mscl-web] [S-RUN] post-start dataMode node_id={node_id}: {dm2}")
+            except Exception as e:
+                log(f"[mscl-web] [S-RUN] post-start dataMode read failed node_id={node_id}: {e}")
+            try:
+                sm2 = node.getSamplingMode()
+                log(f"[mscl-web] [S-RUN] post-start samplingMode node_id={node_id}: {sm2}")
+            except Exception as e:
+                log(f"[mscl-web] [S-RUN] post-start samplingMode read failed node_id={node_id}: {e}")
+            apply_ok = True
+        except Exception as net_err:
+            log(f"[mscl-web] [S-RUN] sync-network start failed node_id={node_id}: {net_err}")
+            return {
+                "success": False,
+                "error": f"Sync network start failed: {net_err}",
+                "rate": sample_rate,
+                "mode": mode_key,
+            }
         token = time.time()
         state.SAMPLE_STOP_TOKENS[node_id] = token
         run = {
@@ -884,6 +1297,7 @@ def api_read(node_id):
                         current_power = TX_POWER_ENUM_TO_DBM.get(p_raw, 16)
                     except Exception as e:
                         log(f"[mscl-web] [{read_tag}] warn node_id={node_id}: transmit power read failed: {e}")
+                tx_power_options = _tx_power_options_for_model(model, current_power)
                 comm_protocol = cached.get("comm_protocol")
                 comm_protocol_text = cached.get("comm_protocol_text")
                 if refresh_eeprom or "comm_protocol" not in cached:
@@ -1281,7 +1695,7 @@ def api_read(node_id):
                             default_mode_options = [
                                 {"value": 0, "label": "Idle"},
                                 {"value": 5, "label": "Sleep"},
-                                {"value": 6, "label": "Sample (Sync)"},
+                                {"value": 6, "label": "Sample"},
                             ]
                             default_mode_options = _filter_default_modes(default_mode_options)
                     except Exception as e:
@@ -1290,7 +1704,7 @@ def api_read(node_id):
                             default_mode_options = [
                                 {"value": 0, "label": "Idle"},
                                 {"value": 5, "label": "Sleep"},
-                                {"value": 6, "label": "Sample (Sync)"},
+                                {"value": 6, "label": "Sample"},
                             ]
                         default_mode_options = _filter_default_modes(default_mode_options)
 
@@ -1374,18 +1788,20 @@ def api_read(node_id):
                     if all(x.get("value") != int(current_sensor_type) for x in thermocouple_sensor_options):
                         thermocouple_sensor_options.insert(0, {"value": int(current_sensor_type), "label": THERMOCOUPLE_SENSOR_LABELS.get(int(current_sensor_type), f"Value {int(current_sensor_type)}")})
                 rtd_wire_options = [{"value": int(k), "label": v} for k, v in RTD_WIRE_LABELS.items()]
+                default_mode_options = _filter_default_modes_for_model(model, default_mode_options, current_default_mode)
+                tx_power_options = _tx_power_options_for_model(model, current_power)
 
                 # Частоты (если доступно)
                 supported_rates = cached.get("supported_rates", [])
                 if (refresh_eeprom or not supported_rates) and current_rate is not None:
-                    supported_rates = [{"enum_val": current_rate, "str_val": RATE_MAP.get(current_rate, str(current_rate) + " Hz")}]
+                    supported_rates = [{"enum_val": int(current_rate), "str_val": _sample_rate_label(current_rate)}]
                     try:
                         features = node.features()
                         rates = features.sampleRates(mscl.WirelessTypes.samplingMode_sync, 1, 0)
                         supported_rates = []
                         for r in rates:
                             rid = int(r)
-                            supported_rates.append({"enum_val": rid, "str_val": RATE_MAP.get(rid, str(rid) + " Hz")})
+                            supported_rates.append({"enum_val": rid, "str_val": _sample_rate_label(rid, r)})
                     except Exception as e:
                         log(f"[mscl-web] [{read_tag}] warn node_id={node_id}: features/sampleRates failed: {e}")
                 supported_rates = _filter_sample_rates_for_model(model, supported_rates, current_rate)
@@ -1410,6 +1826,7 @@ def api_read(node_id):
                     current_unit=current_unit, unit_options=unit_options,
                     current_cjc_unit=current_cjc_unit, cjc_unit_options=cjc_unit_options,
                     current_rate=current_rate, current_power=current_power, current_power_enum=current_power_enum,
+                    tx_power_options=tx_power_options,
                     comm_protocol=comm_protocol, comm_protocol_text=comm_protocol_text,
                     supported_rates=supported_rates, channels=channels,
                     current_low_pass=current_low_pass, low_pass_options=low_pass_options,
@@ -1816,9 +2233,23 @@ def api_write():
                     return jsonify(success=False, error="Sample Rate is unknown. Run FULL READ once or set node in SensorConnect.")
                 if tx_power is None:
                     tx_power = 16
-                if int(tx_power) > 16:
-                    log(f"[mscl-web] Write warn node_id={data.get('node_id')}: tx_power={tx_power} exceeds node limit, clamped to 16 dBm")
-                    tx_power = 16
+                model_hint = cached.get("model")
+                if _is_tc_link_200_oem_model(model_hint):
+                    allowed_tx = [10, 5, 0]
+                else:
+                    allowed_tx = [16, 10, 5, 0]
+                try:
+                    tx_int = int(tx_power)
+                except Exception:
+                    tx_int = allowed_tx[0]
+                if tx_int not in allowed_tx:
+                    fallback_tx = next((p for p in allowed_tx if tx_int >= p), allowed_tx[-1])
+                    log(
+                        f"[mscl-web] Write warn node_id={data.get('node_id')}: "
+                        f"tx_power={tx_int} unsupported for model={model_hint}; using {fallback_tx} dBm"
+                    )
+                    tx_int = fallback_tx
+                tx_power = tx_int
                 if not has_channels or not isinstance(channels, list):
                     channels = [1]
                 channels = [int(ch) for ch in channels if _to_opt_int(ch) in (1, 2)]

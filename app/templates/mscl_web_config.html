@@ -131,14 +131,14 @@
                 <div class="col-md-2">
                     <label class="form-label fw-bold">Data Type</label>
                     <select id="samplingRunDataType" class="form-select">
-                        <option value="float" selected>float</option>
+                        <option value="float" selected>float (raw data)</option>
                     </select>
                 </div>
                 <div class="col-md-2">
                     <label class="form-label fw-bold">Mode</label>
                     <select id="samplingRunWhen" class="form-select" onchange="samplingModeChanged()">
-                        <option value="for" selected>for</option>
-                        <option value="continuous">continuously</option>
+                        <option value="continuous" selected>continuously</option>
+                        <option value="for">for</option>
                     </select>
                 </div>
                 <div class="col-md-2 sampling-value-col">
@@ -148,9 +148,9 @@
                 <div class="col-md-2 sampling-units-col">
                     <label class="form-label fw-bold">Units</label>
                     <select id="samplingRunDurationUnits" class="form-select">
-                        <option value="seconds" selected>seconds</option>
-                        <option value="minutes">minutes</option>
-                        <option value="hours">hours</option>
+                        <option value="seconds" selected>Seconds</option>
+                        <option value="minutes">Minutes</option>
+                        <option value="hours">Hours</option>
                     </select>
                 </div>
             </div>
@@ -276,12 +276,9 @@
                 <div class="fw-bold text-primary mb-3">Power</div>
                 <div class="row g-3">
                     <div class="col-md-6">
-                        <label class="form-label fw-bold">Radio Power</label>
+                        <label class="form-label fw-bold">Transmit Power</label>
                         <select id="txPower" class="form-select">
-                            <option value="16">16 dBm</option>
-                            <option value="10">10 dBm</option>
-                            <option value="5">5 dBm</option>
-                            <option value="0">0 dBm (Min)</option>
+                            <option value="">N/A</option>
                         </select>
                     </div>
                     <div class="col-md-6" id="defaultModeWrap">
@@ -445,7 +442,33 @@
                 statusDiv.innerHTML = "✅ Read complete";
                 document.getElementById('configCard').style.display = "block";
                 
-                document.getElementById('txPower').value = data.current_power;
+                const txSel = document.getElementById('txPower');
+                txSel.innerHTML = "";
+                const txOptions = Array.isArray(data.tx_power_options) ? data.tx_power_options : [];
+                if (!txOptions.length) {
+                    const opt = document.createElement('option');
+                    opt.value = "";
+                    opt.text = "N/A";
+                    opt.selected = true;
+                    txSel.add(opt);
+                    txSel.disabled = true;
+                } else {
+                    txSel.disabled = false;
+                    txOptions.forEach(r => {
+                        const opt = document.createElement('option');
+                        opt.value = r.value;
+                        opt.text = r.label || `${r.value} dBm`;
+                        if (String(r.value) === String(data.current_power)) opt.selected = true;
+                        txSel.add(opt);
+                    });
+                    if (txSel.selectedIndex < 0 && data.current_power !== null && data.current_power !== undefined) {
+                        const cur = document.createElement('option');
+                        cur.value = data.current_power;
+                        cur.text = `${data.current_power} dBm`;
+                        cur.selected = true;
+                        txSel.add(cur);
+                    }
+                }
                 const inputSel = document.getElementById('inputRange');
                 inputSel.innerHTML = "";
                 const inputRanges = Array.isArray(data.supported_input_ranges) ? data.supported_input_ranges : [];
@@ -721,7 +744,7 @@
                     data.comm_protocol_text ? `Comm Protocol: ${data.comm_protocol_text}${(data.comm_protocol !== null && data.comm_protocol !== undefined) ? ` (${data.comm_protocol})` : ''}` : null,
                     data.region ? `Region: ${data.region}` : null,
                     data.frequency ? `Frequency: ${data.frequency}` : null,
-                    (data.current_power !== null && data.current_power !== undefined) ? `Radio Power: ${data.current_power} dBm` : null,
+                    (data.current_power !== null && data.current_power !== undefined) ? `Transmit Power: ${data.current_power} dBm` : null,
                     inputRangeActual ? `Input Range: ${inputRangeActual}` : null,
                     activeChannelsText ? `Active Channels: ${activeChannelsText}` : null,
                     data.sampling_mode ? `Sampling: ${data.sampling_mode}` : null,
@@ -770,7 +793,7 @@
                     </div>
                 `;
                 const channelNames = {
-                    1: "Raw Data (ch1)",
+                    1: "Temperature (ch1)",
                     2: "CJC Temperature (ch2)"
                 };
                 const menu = document.getElementById('channelMenu');
@@ -897,6 +920,7 @@
         panel.style.display = panel.style.display === 'none' ? '' : 'none';
         if (panel.style.display !== 'none') {
             syncSamplingRunRateOptions();
+            samplingModeChanged();
             refreshSamplingRunStatus();
         }
     }
