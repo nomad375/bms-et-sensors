@@ -8,12 +8,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /tmp
 
-# 2. Install MSCL via direct links
-RUN ARCH=$(uname -m) && \
-    if [ "$ARCH" = "x86_64" ]; then \
+# 2. Install MSCL via arch-aware package links.
+# TARGETARCH is provided by Docker/buildx (amd64/arm64). We keep uname fallback
+# so local legacy builds also work on Raspberry Pi.
+ARG TARGETARCH
+RUN ARCH="${TARGETARCH:-$(uname -m)}" && \
+    if [ "$ARCH" = "amd64" ] || [ "$ARCH" = "x86_64" ]; then \
         MSCL_URL="https://github.com/LORD-MicroStrain/MSCL/releases/download/latest/MSCL-Python3.12-x86_64-v68.1.0.deb"; \
-    elif [ "$ARCH" = "aarch64" ]; then \
+    elif [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ]; then \
         MSCL_URL="https://github.com/LORD-MicroStrain/MSCL/releases/download/latest/MSCL-Python3.12-aarch64-v68.1.0.deb"; \
+    else \
+        echo "Unsupported arch for MSCL package: $ARCH" >&2; \
+        exit 1; \
     fi && \
     wget --quiet "$MSCL_URL" -O mscl.deb && \
     dpkg -i mscl.deb || apt-get install -f -y && \
