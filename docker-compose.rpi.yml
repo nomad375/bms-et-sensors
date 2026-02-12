@@ -1,0 +1,24 @@
+services:
+  rpi-ap:
+    build:
+      context: .
+      dockerfile: Dockerfile.rpi-ap
+    image: nomad375/rpi-ap:latest
+    container_name: rpi-ap
+    network_mode: host
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - RPI_AP_INTERFACE=${RPI_AP_INTERFACE}
+      - RPI_AP_UPSTREAM_IFACE=${RPI_AP_UPSTREAM_IFACE}
+      - RPI_AP_SSID=${RPI_AP_SSID}
+      - RPI_AP_PSK=${RPI_AP_PSK}
+      - RPI_AP_CHANNEL=${RPI_AP_CHANNEL}
+      - RPI_AP_CIDR=${RPI_AP_CIDR}
+      - RPI_AP_DHCP_RANGE=${RPI_AP_DHCP_RANGE}
+      - RPI_AP_HW_MODE=${RPI_AP_HW_MODE}
+      - RPI_AP_COUNTRY=${RPI_AP_COUNTRY}
