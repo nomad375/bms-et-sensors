@@ -14,7 +14,7 @@ COMPOSE_CMD=(docker compose)
 install_prerequisites() {
   echo ">>> Installing base packages..."
   sudo apt-get update
-  sudo apt-get install -y ca-certificates curl git
+  sudo apt-get install -y ca-certificates curl git rfkill
 }
 
 install_docker_if_needed() {
@@ -79,6 +79,35 @@ prepare_env_file() {
   fi
 }
 
+configure_wifi_for_ap() {
+  echo ">>> Configuring persistent Wi-Fi unblock for AP startup..."
+
+  sudo tee /etc/systemd/system/wifi-unblock.service >/dev/null <<'EOF'
+[Unit]
+Description=Unblock WiFi at boot
+After=systemd-rfkill.service
+Before=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/rfkill unblock wifi
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now wifi-unblock.service
+
+  # Apply immediately for current boot so rpi-ap can start without reboot.
+  sudo rfkill unblock wifi || true
+
+  # Keep host Wi-Fi radio enabled when NetworkManager is present.
+  if command -v nmcli >/dev/null 2>&1; then
+    sudo nmcli radio wifi on >/dev/null 2>&1 || true
+  fi
+}
+
 build_and_start_stack() {
   echo ">>> Building local ARM-compatible app images (including Wi-Fi AP)..."
   "${COMPOSE_CMD[@]}" -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.rpi.yml build --no-cache redlab-app mscl-app rpi-ap
@@ -102,6 +131,7 @@ resolve_docker_access
 ensure_compose_plugin
 prepare_repo
 prepare_env_file
+configure_wifi_for_ap
 build_and_start_stack
 show_post_checks
 
