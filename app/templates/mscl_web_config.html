@@ -43,15 +43,15 @@
             width: auto !important;
             flex: 0 0 auto;
         }
-        /* Sampling panel: make controls about 2pt smaller for denser layout */
-        #samplingPanel .form-label { font-size: 0.70rem; margin-bottom: 0.2rem; }
+        /* Sampling panel: compact but readable controls */
+        #samplingPanel .form-label { font-size: 0.82rem; margin-bottom: 0.2rem; }
         #samplingPanel .form-select,
-        #samplingPanel .form-control { font-size: 0.70rem; padding-top: 0.2rem; padding-bottom: 0.2rem; }
-        #samplingPanel .btn { font-size: 0.70rem; padding-top: 0.2rem; padding-bottom: 0.2rem; }
-        #samplingRunStatus { font-size: 0.68rem !important; }
+        #samplingPanel .form-control { font-size: 0.82rem; padding-top: 0.24rem; padding-bottom: 0.24rem; }
+        #samplingPanel .btn { font-size: 0.82rem; padding-top: 0.24rem; padding-bottom: 0.24rem; }
+        #samplingRunStatus { font-size: 0.78rem !important; }
         #samplingPanel .sampling-run-row {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            grid-template-columns: repeat(5, minmax(0, 1fr));
             gap: 0.5rem;
             align-items: end;
         }
@@ -61,16 +61,79 @@
             padding-left: 0;
             padding-right: 0;
         }
-        #samplingPanel .sampling-value-col,
-        #samplingPanel .sampling-units-col {
-            min-width: 150px;
-        }
-        #samplingPanel .sampling-value-col { min-width: 160px; }
-        #samplingPanel .sampling-units-col { min-width: 160px; }
         @media (max-width: 991.98px) {
             #samplingPanel .sampling-run-row {
                 grid-template-columns: repeat(2, minmax(0, 1fr));
             }
+        }
+        @media (max-width: 575.98px) {
+            #samplingPanel .sampling-run-row {
+                grid-template-columns: 1fr;
+            }
+        }
+        .memo-popover {
+            position: relative;
+            display: inline-block;
+            margin-bottom: 0.75rem;
+        }
+        .memo-popover > summary {
+            list-style: none;
+            cursor: pointer;
+            user-select: none;
+            display: inline-block;
+            border: 1px solid #c7d3e4;
+            border-radius: 6px;
+            padding: 0.25rem 0.55rem;
+            background: #f2f7ff;
+            color: #2b5cab;
+            font-size: 0.78rem;
+            font-weight: 700;
+        }
+        .memo-popover > summary::-webkit-details-marker { display: none; }
+        .memo-popover-panel {
+            display: none;
+            position: absolute;
+            top: calc(100% + 6px);
+            left: 0;
+            z-index: 30;
+            width: min(720px, 92vw);
+            border: 1px solid #dfe5ec;
+            border-radius: 8px;
+            background: #f7fafc;
+            padding: 0.75rem;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.14);
+        }
+        .memo-popover[open] .memo-popover-panel { display: block; }
+        .memo-popover .memo-title {
+            font-size: 0.82rem;
+            font-weight: 700;
+            color: #2b5cab;
+            margin-bottom: 0.35rem;
+        }
+        .memo-popover table {
+            width: 100%;
+            font-size: 0.75rem;
+            margin-bottom: 0.4rem;
+        }
+        .memo-popover th,
+        .memo-popover td {
+            border: 1px solid #dfe5ec;
+            padding: 0.2rem 0.35rem;
+            vertical-align: top;
+        }
+        .memo-popover th {
+            background: #eef3f9;
+            font-weight: 700;
+        }
+        .memo-popover ul {
+            margin: 0;
+            padding-left: 1rem;
+            font-size: 0.74rem;
+        }
+        @media (max-width: 575.98px) {
+            .memo-popover { display: block; }
+            .memo-popover > summary { width: 100%; text-align: center; }
+            .memo-popover-panel { left: 0; right: 0; width: auto; }
         }
     </style>
 </head>
@@ -118,10 +181,6 @@
         <div id="samplingPanel" class="border rounded p-3 mt-3 bg-light" style="display:none;">
             <div class="fw-bold text-primary mb-2">Sampling Network</div>
             <div class="row g-2 align-items-end sampling-run-row">
-                <div class="col-md-2">
-                    <label class="form-label fw-bold">Sample Rate</label>
-                    <select id="samplingRunRate" class="form-select"></select>
-                </div>
                 <div class="col-md-2">
                     <label class="form-label fw-bold">Log/Transmit</label>
                     <select id="samplingRunMode" class="form-select">
@@ -196,13 +255,17 @@
                     </div>
                 </div>
                 <div class="row mb-3">
-                    <div class="col-md-6" id="inputRangeWrap">
+                    <div class="col-md-4" id="inputRangeWrap">
                         <label class="form-label fw-bold">Input Range</label>
                         <select id="inputRange" class="form-select">
                             <option value="">N/A</option>
                         </select>
                     </div>
-                    <div class="col-md-6" id="lowPassFilterWrap">
+                    <div class="col-md-4">
+                        <label class="form-label fw-bold">Sample Rate</label>
+                        <select id="sampleRate" class="form-select"></select>
+                    </div>
+                    <div class="col-md-4" id="lowPassFilterWrap">
                         <label class="form-label fw-bold">Low Pass Filter</label>
                         <select id="lowPassFilter" class="form-select">
                             <option value="">N/A</option>
@@ -211,6 +274,43 @@
                 </div>
                 <label class="form-label fw-bold">Active Channels (Raw Mode)</label>
                 <div id="channelsArea"></div>
+                <details class="memo-popover mt-3">
+                    <summary>Memo: LPF × Sample Rate</summary>
+                    <div class="memo-popover-panel">
+                        <div class="memo-title">Validated Compatibility Matrix</div>
+                        <table>
+                            <thead>
+                            <tr>
+                                <th>Low Pass Filter</th>
+                                <th>Allowed Sample Rates</th>
+                                <th>Constraint</th>
+                            </tr>
+                            </thead>
+                            <tbody>
+                            <tr>
+                                <td>2.6 Hz (120db 50/60 Hz rejection)</td>
+                                <td>1 Hz, 2 Hz</td>
+                                <td>Max 2 Hz</td>
+                            </tr>
+                            <tr>
+                                <td>12.66 Hz (92db 50/60 Hz rejection)</td>
+                                <td>1 Hz, 2 Hz, 4 Hz, 8 Hz</td>
+                                <td>Max 8 Hz</td>
+                            </tr>
+                            <tr>
+                                <td>294 Hz</td>
+                                <td>1 Hz, 2 Hz, 4 Hz, 8 Hz, 16 Hz, 32 Hz, 64 Hz, 128 Hz</td>
+                                <td>No LPF-imposed rate cap reached</td>
+                            </tr>
+                            </tbody>
+                        </table>
+                        <ul>
+                            <li>Typically smooth: 2.6×1, 2.6×2, 12.66×8.</li>
+                            <li>Saw-tooth appears more often: 294×32/64/128 (burst delivery + higher HF variance).</li>
+                            <li>Start fail for 12.66×16/64: "Sample Rate exceeds max (8Hz) for selected LPF".</li>
+                        </ul>
+                    </div>
+                </details>
             </div>
 
             <div class="border rounded p-3 mb-3 bg-light">
@@ -236,10 +336,6 @@
             <div class="border rounded p-3 mb-3 bg-light">
                 <div class="fw-bold text-primary mb-3">Sampling</div>
                 <div class="row mb-3">
-                    <div class="col-md-6">
-                        <label class="form-label fw-bold">Sample Rate</label>
-                        <select id="sampleRate" class="form-select"></select>
-                    </div>
                     <div class="col-md-6" id="dataModeWrap">
                         <label class="form-label fw-bold">Data Mode</label>
                         <select id="dataMode" class="form-select">

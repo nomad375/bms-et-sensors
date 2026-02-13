@@ -89,6 +89,9 @@ from mscl_settings import (
     MSCL_META_OFFSET_METRIC,
     MSCL_ONLY_CHANNEL_1,
     MSCL_SOURCE_NODE_EXPORT,
+    MSCL_RESAMPLED_ENABLED,
+    MSCL_RESAMPLED_MEASUREMENT,
+    MSCL_RESAMPLED_INCLUDE_RAW_TS,
     MSCL_SOURCE_RADIO,
     MSCL_STREAM_BATCH_SIZE,
     MSCL_STREAM_DROP_LOG_THROTTLE_SEC,
@@ -261,6 +264,10 @@ def _stream_loop():
         point_channel_fn=_point_channel,
         point_value_fn=_point_value,
         point_time_ns_fn=_point_time_ns,
+        sample_rate_to_hz_fn=_sample_rate_text_to_hz,
+        resampled_enabled=MSCL_RESAMPLED_ENABLED,
+        resampled_measurement=MSCL_RESAMPLED_MEASUREMENT,
+        resampled_include_raw_ts=MSCL_RESAMPLED_INCLUDE_RAW_TS,
     )
 
 

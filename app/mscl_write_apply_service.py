@@ -1,6 +1,34 @@
 from typing import Any
 
 
+def _config_issues_text(mscl_mod, issues):
+    texts = []
+    try:
+        for issue in issues:
+            try:
+                txt = str(issue.description()).strip()
+            except Exception:
+                txt = str(issue).strip()
+            if txt:
+                texts.append(txt)
+    except Exception:
+        pass
+    return "; ".join(texts)
+
+
+def _verify_node_config(mscl_mod, node, cfg):
+    try:
+        issues = mscl_mod.ConfigIssues()
+        ok = bool(node.verifyConfig(cfg, issues))
+        if ok:
+            return True, None
+        details = _config_issues_text(mscl_mod, issues) or "verifyConfig returned false"
+        return False, details
+    except Exception:
+        # Some MSCL stacks may not support verifyConfig consistently across models/fw.
+        return True, None
+
+
 def apply_write_connected(
     *,
     node_id: int,
@@ -125,6 +153,9 @@ def apply_write_connected(
     supports_transducer_type = bool(build_res["supports_transducer_type"])
     supports_temp_sensor_options = bool(build_res["supports_temp_sensor_options"])
     write_hw_effective = dict(build_res["write_hw_effective"])
+    verify_ok, verify_err = _verify_node_config(mscl_mod, node, config)
+    if not verify_ok:
+        return jsonify_fn(success=False, error=f"Configuration is not supported by node: {verify_err}")
     try:
         node.applyConfig(config)
     except Exception as e:
@@ -178,6 +209,9 @@ def apply_write_connected(
             supports_transducer_type = bool(build_res2["supports_transducer_type"])
             supports_temp_sensor_options = bool(build_res2["supports_temp_sensor_options"])
             write_hw_effective = dict(build_res2["write_hw_effective"])
+            verify_ok2, verify_err2 = _verify_node_config(mscl_mod, node, config2)
+            if not verify_ok2:
+                return jsonify_fn(success=False, error=f"Configuration is not supported by node: {verify_err2}")
             node.applyConfig(config2)
         else:
             raise

@@ -1,24 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "Cleaning all docker artifacts..."
+echo "Cleaning Docker artifacts for THIS project only..."
 
-containers=$(docker ps -a -q)
-if [ -n "$containers" ]; then
-  echo ">> Removing containers"
-  docker rm -f $containers >/dev/null 2>&1 || true
-fi
+COMPOSE_ARGS=(-f docker-compose.yml -f docker-compose.override.yml)
 
-images=$(docker images -q)
-if [ -n "$images" ]; then
-  echo ">> Removing images"
-  docker rmi -f $images >/dev/null 2>&1 || true
-fi
+echo ">> Stopping and removing project containers/networks/volumes"
+docker compose "${COMPOSE_ARGS[@]}" down --remove-orphans --volumes || true
 
-echo ">> Pruning volumes"
-docker volume prune -f >/dev/null 2>&1 || true
+echo ">> Removing project images (if present)"
+docker image rm \
+  nomad375/mscl-daq:latest \
+  nomad375/redlab-daq:latest \
+  >/dev/null 2>&1 || true
 
-echo ">> Pruning networks"
-docker network prune -f >/dev/null 2>&1 || true
+echo ">> Removing dangling layers only"
+docker image prune -f >/dev/null 2>&1 || true
 
-echo "Docker cleanup complete."
+echo "Project Docker cleanup complete."

@@ -133,6 +133,10 @@ def start_sampling_run(
                     except Exception:
                         pass
                     joined = "; ".join([t for t in issue_texts if t]) or "verifyConfig returned false"
+                    log_func(
+                        f"[mscl-web] [S-RUN] verifyConfig failed node_id={node_id} "
+                        f"rate={sample_rate} data_type={data_type} mode={mode_key}: {joined}"
+                    )
                     return {
                         "success": False,
                         "error": f"Sampling config verify failed: {joined}",

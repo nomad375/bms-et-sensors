@@ -449,7 +449,6 @@
                     if(r.enum_val == data.current_rate) opt.selected = true;
                     sel.add(opt);
                 });
-                syncSamplingRunRateOptions();
                 const runDataTypeSel = document.getElementById('samplingRunDataType');
                 const currentRunDataType = String(data.current_data_type || 'float').toLowerCase();
                 if (runDataTypeSel) {
@@ -597,7 +596,6 @@
         const panel = document.getElementById('samplingPanel');
         panel.style.display = panel.style.display === 'none' ? '' : 'none';
         if (panel.style.display !== 'none') {
-            syncSamplingRunRateOptions();
             samplingModeChanged();
             refreshSamplingRunStatus();
         }
@@ -612,39 +610,11 @@
         unitsEl.disabled = isContinuous;
     }
 
-    function syncSamplingRunRateOptions() {
-        const main = document.getElementById('sampleRate');
-        const run = document.getElementById('samplingRunRate');
-        if (!main || !run) return;
-        const oldValue = run.value;
-        run.innerHTML = '';
-        Array.from(main.options).forEach(opt => {
-            if (!opt.value) return;
-            const n = document.createElement('option');
-            n.value = opt.value;
-            n.text = opt.text;
-            if (String(opt.value) === String(main.value)) n.selected = true;
-            run.add(n);
-        });
-        if (oldValue && Array.from(run.options).some(o => String(o.value) === String(oldValue))) {
-            run.value = oldValue;
-        }
-        if (!run.options.length) {
-            const n = document.createElement('option');
-            n.value = '';
-            n.text = 'N/A';
-            run.add(n);
-            run.disabled = true;
-        } else {
-            run.disabled = false;
-        }
-    }
-
     async function startSamplingRun() {
         const id = document.getElementById('nodeId').value;
         const statusDiv = document.getElementById('samplingRunStatus');
         const btn = document.getElementById('btnSamplingStart');
-        const rateRaw = document.getElementById('samplingRunRate').value;
+        const rateRaw = document.getElementById('sampleRate').value;
         const when = document.getElementById('samplingRunWhen').value;
         const durationValueRaw = document.getElementById('samplingRunDurationValue').value;
         const durationUnits = document.getElementById('samplingRunDurationUnits').value;

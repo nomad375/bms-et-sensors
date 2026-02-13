@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo ">>> Rebuild and restart stack on amd64 host (no rpi-ap)..."
+echo ">>> Rebuild and restart stack..."
 
 COMPOSE="docker compose -f docker-compose.yml -f docker-compose.override.yml"
 
@@ -12,4 +12,3 @@ echo ">>> Restarting services..."
 $COMPOSE up -d --no-deps mscl-app redlab-app influxdb grafana
 
 echo ">>> Stack refreshed on amd64."
-

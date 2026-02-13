@@ -181,7 +181,6 @@
         "y": 16
       },
       "id": 3,
-      "maxDataPoints": 20000,
       "options": {
         "legend": {
           "calcs": [],
@@ -200,7 +199,7 @@
             "type": "influxdb",
             "uid": "InfluxDB_Flux"
           },
-          "query": "from(bucket: \"daq_data\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"mscl_sensors\")\n  |> filter(fn: (r) => r[\"_field\"] == \"value\")\n  |> filter(fn: (r) => r[\"source\"] == \"mscl_config_stream\")\n  |> filter(fn: (r) => r[\"channel\"] == \"ch1\")\n  |> yield(name: \"radio\")",
+          "query": "from(bucket: \"daq_data\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"mscl_sensors_resampled\")\n  |> filter(fn: (r) => r[\"_field\"] == \"value\")\n  |> filter(fn: (r) => r[\"source\"] == \"mscl_config_stream\")\n  |> filter(fn: (r) => r[\"channel\"] == \"ch1\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"radio\")",
           "refId": "A"
         }
       ],
@@ -268,7 +267,6 @@
         "y": 28
       },
       "id": 4,
-      "maxDataPoints": 20000,
       "options": {
         "legend": {
           "calcs": [],
@@ -287,7 +285,7 @@
             "type": "influxdb",
             "uid": "InfluxDB_Flux"
           },
-          "query": "from(bucket: \"daq_data\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"mscl_sensors\")\n  |> filter(fn: (r) => r[\"_field\"] == \"value\")\n  |> filter(fn: (r) => r[\"source\"] == \"mscl_node_export\")\n  |> filter(fn: (r) => r[\"channel\"] == \"ch1\")\n  |> yield(name: \"node_export\")",
+          "query": "from(bucket: \"daq_data\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"mscl_sensors\")\n  |> filter(fn: (r) => r[\"_field\"] == \"value\")\n  |> filter(fn: (r) => r[\"source\"] == \"mscl_node_export\")\n  |> filter(fn: (r) => r[\"channel\"] == \"ch1\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"node_export\")",
           "refId": "A"
         }
       ],
