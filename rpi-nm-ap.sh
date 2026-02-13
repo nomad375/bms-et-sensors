@@ -71,7 +71,13 @@ list_wifi_ifaces() {
 }
 
 list_eth_ifaces() {
-  nmcli -t -f DEVICE,TYPE device status | awk -F: '$2=="ethernet"{print $1}'
+  nmcli -t -f DEVICE,TYPE device status | awk -F: '$2=="ethernet"{print $1}' | while read -r ifn; do
+    [[ -z "${ifn}" ]] && continue
+    # Skip virtual/docker-style interfaces; keep only physical NICs.
+    [[ "${ifn}" == veth* || "${ifn}" == docker* || "${ifn}" == br-* || "${ifn}" == virbr* ]] && continue
+    [[ -e "/sys/class/net/${ifn}/device" ]] || continue
+    echo "${ifn}"
+  done
 }
 
 ensure_nm_running() {
@@ -99,7 +105,6 @@ configure_ap_on_builtin_wifi() {
   # Reuse existing AP profile if present, otherwise create.
   if nmcli -t -f NAME connection show | grep -Fxq "${AP_NAME}"; then
     run_nmcli connection modify "${AP_NAME}" \
-      connection.type wifi \
       connection.interface-name "${ap_if}" \
       connection.autoconnect yes \
       802-11-wireless.ssid "${AP_SSID}" \

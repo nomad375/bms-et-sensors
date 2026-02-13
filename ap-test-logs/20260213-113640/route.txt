@@ -1,4 +1,0 @@
-=== Route check ===
-local 10.42.0.1 dev lo src 10.42.0.1 uid 1000 
-    cache <local> 
-
