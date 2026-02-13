@@ -30,11 +30,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY app/requirements.txt .
+COPY app/redlab/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY app/ .
+COPY app/redlab/ .
 
 ENV PYTHONUNBUFFERED=1
 # Run the renamed main script

@@ -13,3 +13,6 @@ __pycache__/
 
 # Local docs/media
 *.pdf
+
+# Local test run artifacts
+tests/runs/

@@ -1,6 +1,7 @@
     const LAST_COMM_WARN_SEC = 30;
     const LAST_COMM_CRITICAL_SEC = 120;
     let idleConfirmed = false;
+    let readConfirmed = false;
     let writeCaps = {};
     let currentRtdSensorOptions = [];
     let currentThermistorSensorOptions = [];
@@ -11,12 +12,52 @@
         const btnRead = document.getElementById('btnRead');
         const btnWrite = document.getElementById('btnWrite');
         if (btnRead) btnRead.disabled = !idleConfirmed;
-        if (btnWrite) btnWrite.disabled = !idleConfirmed;
+        if (btnWrite) btnWrite.disabled = (!idleConfirmed || !readConfirmed);
     }
 
     function markIdleState(isIdle) {
         idleConfirmed = !!isIdle;
         updateReadWriteButtons();
+    }
+
+    function markReadState(isRead) {
+        readConfirmed = !!isRead;
+        updateReadWriteButtons();
+    }
+
+    function formatLocalTimestamp(dateObj) {
+        const dt = dateObj instanceof Date ? dateObj : new Date();
+        const yyyy = dt.getFullYear();
+        const mm = String(dt.getMonth() + 1).padStart(2, "0");
+        const dd = String(dt.getDate()).padStart(2, "0");
+        const hh = String(dt.getHours()).padStart(2, "0");
+        const mi = String(dt.getMinutes()).padStart(2, "0");
+        const ss = String(dt.getSeconds()).padStart(2, "0");
+        return `${yyyy}-${mm}-${dd} ${hh}:${mi}:${ss}`;
+    }
+
+    function updateSampleRateHint() {
+        const hint = document.getElementById('sampleRateHint');
+        const lpSel = document.getElementById('lowPassFilter');
+        if (!hint || !lpSel) return;
+        const label = (lpSel.options[lpSel.selectedIndex]?.text || "").toLowerCase();
+        if (!label || label === "n/a") {
+            hint.innerText = "Read node to populate constraints.";
+            return;
+        }
+        if (label.includes("2.6")) {
+            hint.innerText = "LPF 2.6 Hz: max sample rate 2 Hz.";
+            return;
+        }
+        if (label.includes("12.66")) {
+            hint.innerText = "LPF 12.66 Hz: max sample rate 8 Hz.";
+            return;
+        }
+        if (label.includes("294")) {
+            hint.innerText = "LPF 294 Hz: sample rate not capped by LPF.";
+            return;
+        }
+        hint.innerText = "Check LPF vs sample rate compatibility.";
     }
 
     function renderHardwareDependentOptions() {
@@ -82,11 +123,11 @@
             const statusDiv = document.getElementById('baseActionStatus');
             if (data.success) {
                 statusDiv.className = "small fw-bold status-ok mb-2";
-                statusDiv.innerHTML = "✅ Base connected";
+                statusDiv.innerHTML = "Base connected";
                 markIdleState(false);
             } else {
                 statusDiv.className = "small fw-bold status-err mb-2";
-                statusDiv.innerHTML = `❌ Base connect failed: ${data.message || data.error || 'Unknown error'}`;
+                statusDiv.innerHTML = `Base connect failed: ${data.message || data.error || 'Unknown error'}`;
                 markIdleState(false);
             }
             await refreshBaseStatus();
@@ -96,11 +137,13 @@
     async function readConfig() {
         const id = document.getElementById('nodeId').value;
         const statusDiv = document.getElementById('readStatus');
+        const metaDiv = document.getElementById('readMeta');
         const btnRead = document.getElementById('btnRead');
         const wasIdle = idleConfirmed;
         btnRead.disabled = true;
         statusDiv.className = "mt-2 text-center text-primary";
-        statusDiv.innerHTML = "⌛ Reading...";
+        statusDiv.innerHTML = "Reading...";
+        if (metaDiv) metaDiv.innerText = "";
         document.getElementById('configCard').style.display = "none";
         
         try {
@@ -108,7 +151,8 @@
             const data = await res.json();
             if(data.success) {
                 statusDiv.className = "mt-2 text-center status-ok";
-                statusDiv.innerHTML = "✅ Read complete";
+                statusDiv.innerHTML = "Read complete";
+                if (metaDiv) metaDiv.innerText = `Loaded from node at ${formatLocalTimestamp(new Date())}`;
                 document.getElementById('configCard').style.display = "block";
                 
                 const txSel = document.getElementById('txPower');
@@ -217,6 +261,7 @@
                         lpSel.add(opt);
                     });
                 }
+                lpSel.onchange = updateSampleRateHint;
 
                 const smSel = document.getElementById('storageLimitMode');
                 smSel.innerHTML = "";
@@ -449,6 +494,7 @@
                     if(r.enum_val == data.current_rate) opt.selected = true;
                     sel.add(opt);
                 });
+                updateSampleRateHint();
                 const runDataTypeSel = document.getElementById('samplingRunDataType');
                 const currentRunDataType = String(data.current_data_type || 'float').toLowerCase();
                 if (runDataTypeSel) {
@@ -484,13 +530,15 @@
                 document.getElementById('btnClearStorage').disabled = false;
                 document.getElementById('btnExportStorage').disabled = false;
                 document.getElementById('btnExportInflux').disabled = false;
+                markReadState(true);
                 markIdleState(String(data.state) === "0");
             } else {
                 statusDiv.className = "mt-2 text-center status-err";
-                statusDiv.innerHTML = "❌ Error: " + data.error;
+                statusDiv.innerHTML = "Error: " + data.error;
                 document.getElementById('btnClearStorage').disabled = true;
                 document.getElementById('btnExportStorage').disabled = true;
                 document.getElementById('btnExportInflux').disabled = true;
+                markReadState(false);
                 markIdleState(false);
             }
         } finally {
@@ -534,21 +582,21 @@
         const btn = document.getElementById('btnProbe');
         btn.disabled = true;
         statusDiv.className = "mt-2 text-center text-primary";
-        statusDiv.innerHTML = "🛰️ Probing node...";
+        statusDiv.innerHTML = "Probing node...";
         try {
             const res = await fetch(`/api/probe/${id}`);
             const data = await res.json();
             if (data.success) {
                 statusDiv.className = "mt-2 text-center status-ok";
-                statusDiv.innerHTML = `✅ ${data.message || 'Probe OK'}`;
+                statusDiv.innerHTML = `${data.message || 'Probe OK'}`;
             } else {
                 statusDiv.className = "mt-2 text-center status-err";
-                statusDiv.innerHTML = `❌ ${data.error || 'Probe failed'}`;
+                statusDiv.innerHTML = `${data.error || 'Probe failed'}`;
             }
             markIdleState(false);
         } catch (e) {
             statusDiv.className = "mt-2 text-center status-err";
-            statusDiv.innerHTML = "❌ Probe failed";
+            statusDiv.innerHTML = "Probe failed";
             markIdleState(false);
         } finally {
             btn.disabled = false;
@@ -562,7 +610,7 @@
         btn.disabled = true;
         try {
             statusDiv.className = "mt-2 text-center text-primary";
-            statusDiv.innerHTML = "⏳ Sending Set to Idle...";
+            statusDiv.innerHTML = "Sending Set to Idle...";
             const res = await fetch(`/api/node_idle/${id}`, {method:'POST'});
             const data = await res.json();
             const st = data.idle_status || {};
@@ -572,20 +620,20 @@
             const confirmed = st.state_confirmed === true ? "confirmed" : "pending";
             if (!data.success) {
                 statusDiv.className = "mt-2 text-center status-err";
-                statusDiv.innerHTML = `❌ Idle result: ${idleResult} | ${data.error || 'Set to Idle failed'} | cmd:${sent} | link:${link} | idle:${confirmed}`;
+                statusDiv.innerHTML = `Idle result: ${idleResult} | ${data.error || 'Set to Idle failed'} | cmd:${sent} | link:${link} | idle:${confirmed}`;
                 markIdleState(false);
             } else if (data.idle_confirmed) {
                 statusDiv.className = "mt-2 text-center status-ok";
-                statusDiv.innerHTML = `✅ Idle result: ${idleResult} | Idle confirmed | cmd:${sent} | link:${link} | idle:${confirmed}`;
+                statusDiv.innerHTML = `Idle result: ${idleResult} | Idle confirmed | cmd:${sent} | link:${link} | idle:${confirmed}`;
                 markIdleState(true);
             } else {
                 statusDiv.className = "mt-2 text-center status-warn";
-                statusDiv.innerHTML = `⚠️ Idle result: ${idleResult} (${data.reason || 'pending'}) | cmd:${sent} | link:${link} | idle:${confirmed}`;
+                statusDiv.innerHTML = `Idle result: ${idleResult} (${data.reason || 'pending'}) | cmd:${sent} | link:${link} | idle:${confirmed}`;
                 markIdleState(false);
             }
         } catch (e) {
             statusDiv.className = "mt-2 text-center status-err";
-            statusDiv.innerHTML = "❌ Set to Idle failed";
+            statusDiv.innerHTML = "Set to Idle failed";
             markIdleState(false);
         } finally {
             setTimeout(() => { btn.disabled = false; }, 1500);
@@ -595,10 +643,15 @@
     function toggleSamplingPanel() {
         const panel = document.getElementById('samplingPanel');
         panel.style.display = panel.style.display === 'none' ? '' : 'none';
+        setSamplingActive(panel.style.display !== 'none');
         if (panel.style.display !== 'none') {
             samplingModeChanged();
             refreshSamplingRunStatus();
         }
+    }
+
+    function setSamplingActive(isActive) {
+        document.body.classList.toggle('sampling-active', !!isActive);
     }
 
     function samplingModeChanged() {
@@ -677,6 +730,7 @@
                 statusDiv.className = "small status-ok mt-2";
                 statusDiv.innerText = data.message || "Stop command sent";
                 if ((data.idle_status || {}).state_confirmed === true) markIdleState(true);
+                setSamplingActive(false);
             } else {
                 statusDiv.className = "small status-err mt-2";
                 statusDiv.innerText = `Stop failed: ${data.error || 'unknown error'}`;
@@ -707,6 +761,9 @@
             const linkState = data.link_state ? ` | link ${data.link_state}` : "";
             statusDiv.className = "small text-muted mt-2";
             statusDiv.innerText = `State ${runState} | mode ${mode}${left}${nodeState}${linkState}`;
+            const runStateNorm = String(runState || "").toLowerCase();
+            const isRunning = !["idle", "stopped", "complete", "completed", "done"].includes(runStateNorm);
+            setSamplingActive(isRunning);
         } catch (e) {
             // silent
         }
@@ -723,20 +780,20 @@
         btn.disabled = true;
         try {
             statusDiv.className = "mt-2 text-center text-primary";
-            statusDiv.innerHTML = "⏳ Sending Sleep command...";
+            statusDiv.innerHTML = "Sending Sleep command...";
             const res = await fetch(`/api/node_sleep/${id}`, {method:'POST'});
             const data = await res.json();
             if (data.success) {
                 statusDiv.className = "mt-2 text-center status-ok";
-                statusDiv.innerHTML = `✅ ${data.message}`;
+                statusDiv.innerHTML = `${data.message}`;
                 markIdleState(false);
             } else {
                 statusDiv.className = "mt-2 text-center status-err";
-                statusDiv.innerHTML = `❌ ${data.error || 'Sleep failed'}`;
+                statusDiv.innerHTML = `${data.error || 'Sleep failed'}`;
             }
         } catch (e) {
             statusDiv.className = "mt-2 text-center status-err";
-            statusDiv.innerHTML = "❌ Sleep failed";
+            statusDiv.innerHTML = "Sleep failed";
         } finally {
             btn.disabled = false;
         }
@@ -748,21 +805,21 @@
         const btn = document.getElementById('btnCyclePower');
         btn.disabled = true;
         statusDiv.className = "mt-2 text-center text-primary";
-        statusDiv.innerHTML = "⏳ Sending Power Cycle...";
+        statusDiv.innerHTML = "Sending Power Cycle...";
         try {
             const res = await fetch(`/api/node_cycle_power/${id}`, {method:'POST'});
             const data = await res.json();
             if (data.success) {
                 statusDiv.className = "mt-2 text-center status-ok";
-                statusDiv.innerHTML = "✅ Power cycle command sent";
+                statusDiv.innerHTML = "Power cycle command sent";
                 markIdleState(false);
             } else {
                 statusDiv.className = "mt-2 text-center status-err";
-                statusDiv.innerHTML = `❌ ${data.error}`;
+                statusDiv.innerHTML = `${data.error}`;
             }
         } catch (e) {
             statusDiv.className = "mt-2 text-center status-err";
-            statusDiv.innerHTML = "❌ Power cycle failed";
+            statusDiv.innerHTML = "Power cycle failed";
         } finally {
             btn.disabled = false;
         }
@@ -774,20 +831,20 @@
         const btn = document.getElementById('btnClearStorage');
         btn.disabled = true;
         statusDiv.className = "mt-2 text-center text-primary";
-        statusDiv.innerHTML = "⏳ Clearing storage...";
+        statusDiv.innerHTML = "Clearing storage...";
         try {
             const res = await fetch(`/api/clear_storage/${id}`, {method:'POST'});
             const data = await res.json();
             if (data.success) {
                 statusDiv.className = "mt-2 text-center status-ok";
-                statusDiv.innerHTML = "✅ Storage cleared";
+                statusDiv.innerHTML = "Storage cleared";
             } else {
                 statusDiv.className = "mt-2 text-center status-err";
-                statusDiv.innerHTML = `❌ ${data.error || 'Clear storage failed'}`;
+                statusDiv.innerHTML = `${data.error || 'Clear storage failed'}`;
             }
         } catch (e) {
             statusDiv.className = "mt-2 text-center status-err";
-            statusDiv.innerHTML = "❌ Clear storage failed";
+            statusDiv.innerHTML = "Clear storage failed";
         } finally {
             btn.disabled = false;
         }
@@ -812,7 +869,7 @@
             const h = Number(uiHoursTxt);
             if (!Number.isFinite(h) || h <= 0) {
                 statusDiv.className = "mt-2 text-center status-err";
-                statusDiv.innerHTML = "❌ Invalid hours value";
+                statusDiv.innerHTML = "Invalid hours value";
                 btn.disabled = false;
                 return;
             }
@@ -821,7 +878,7 @@
             timeWindowParams = `&ui_from=${encodeURIComponent(fromIso)}&ui_to=${encodeURIComponent(toIso)}`;
         }
         statusDiv.className = "mt-2 text-center text-primary";
-        statusDiv.innerHTML = "⏳ Exporting CSV from node storage...";
+        statusDiv.innerHTML = "Exporting CSV from node storage...";
         try {
             const res = await fetch(`/api/export_storage/${id}?format=csv&ingest_influx=0${timeWindowParams}`);
             if (!res.ok) {
@@ -848,10 +905,10 @@
             a.remove();
             URL.revokeObjectURL(url);
             statusDiv.className = "mt-2 text-center status-ok";
-            statusDiv.innerHTML = "✅ CSV downloaded";
+            statusDiv.innerHTML = "CSV downloaded";
         } catch (e) {
             statusDiv.className = "mt-2 text-center status-err";
-            statusDiv.innerHTML = `❌ ${e.message || 'Export failed'}`;
+            statusDiv.innerHTML = `${e.message || 'Export failed'}`;
         } finally {
             btn.disabled = false;
         }
@@ -863,7 +920,7 @@
         const btn = document.getElementById('btnExportInflux');
         btn.disabled = true;
         statusDiv.className = "mt-2 text-center text-primary";
-        statusDiv.innerHTML = "⏳ Exporting node storage to Influx node-export stream...";
+        statusDiv.innerHTML = "Exporting node storage to Influx node-export stream...";
         try {
             const res = await fetch(`/api/export_storage/${id}?format=none&ingest_influx=1&align_clock=host`);
             const data = await res.json().catch(() => ({}));
@@ -875,10 +932,10 @@
             const offsetNs = parseInt(String(data.clock_offset_ns || 0), 10);
             const offsetSec = Number.isFinite(offsetNs) ? (offsetNs / 1e9).toFixed(3) : "0.000";
             statusDiv.className = "mt-2 text-center status-ok";
-            statusDiv.innerHTML = `✅ Exported to Influx: ${written} new | ${skipped} already existed | clock offset: ${offsetSec}s`;
+            statusDiv.innerHTML = `Exported to Influx: ${written} new | ${skipped} already existed | clock offset: ${offsetSec}s`;
         } catch (e) {
             statusDiv.className = "mt-2 text-center status-err";
-            statusDiv.innerHTML = `❌ ${e.message || 'Export to Influx failed'}`;
+            statusDiv.innerHTML = `${e.message || 'Export to Influx failed'}`;
         } finally {
             btn.disabled = false;
         }
@@ -908,22 +965,22 @@
         const statusDiv = document.getElementById('writeStatus');
         if (!idleConfirmed) {
             statusDiv.className = "mt-3 text-center status-err";
-            statusDiv.innerHTML = "❌ Node is not confirmed in Idle. Press Set to Idle first.";
+            statusDiv.innerHTML = "Node is not confirmed in Idle. Press Set to Idle first.";
             return;
         }
         if (!rate || Number.isNaN(parseInt(rate))) {
             statusDiv.className = "mt-3 text-center status-err";
-            statusDiv.innerHTML = "❌ Sample Rate is unknown (N/A). Run FULL READ once or configure in SensorConnect.";
+            statusDiv.innerHTML = "Sample Rate is unknown (N/A). Run FULL READ once or configure in SensorConnect.";
             return;
         }
         if (transducerTypeRaw !== "" && sensorTypeRaw === "") {
             statusDiv.className = "mt-3 text-center status-err";
-            statusDiv.innerHTML = "❌ Sensor Type is required for selected Transducer Type.";
+            statusDiv.innerHTML = "Sensor Type is required for selected Transducer Type.";
             return;
         }
         if (transducerTypeRaw === "1" && wireTypeRaw === "") {
             statusDiv.className = "mt-3 text-center status-err";
-            statusDiv.innerHTML = "❌ Wire Type is required for RTD.";
+            statusDiv.innerHTML = "Wire Type is required for RTD.";
             return;
         }
 
@@ -933,7 +990,7 @@
         });
         
         statusDiv.className = "mt-3 text-center text-primary";
-        statusDiv.innerHTML = "⏳ Writing config...";
+        statusDiv.innerHTML = "Writing config...";
         try {
             const payload = {
                 node_id: id,
@@ -969,7 +1026,7 @@
                 body: JSON.stringify(payload)
             });
             const data = await res.json();
-            statusDiv.innerHTML = data.success ? "<span class='status-ok'>✅ SAVED SUCCESSFULLY</span>" : `<span class='status-err'>❌ ${data.error}</span>`;
+            statusDiv.innerHTML = data.success ? "<span class='status-ok'>SAVED SUCCESSFULLY</span>" : `<span class='status-err'>${data.error}</span>`;
         } catch (e) { }
     }
 
@@ -1005,6 +1062,9 @@
         if (exportBtn) exportBtn.disabled = true;
         const exportInfluxBtn = document.getElementById('btnExportInflux');
         if (exportInfluxBtn) exportInfluxBtn.disabled = true;
+        const metaDiv = document.getElementById('readMeta');
+        if (metaDiv) metaDiv.innerText = "";
+        markReadState(false);
     });
     document.getElementById('lostBeaconEnabled').addEventListener('change', function() {
         document.getElementById('lostBeaconTimeout').disabled = !this.checked;
@@ -1084,10 +1144,10 @@
             const statusDiv = document.getElementById('readStatus');
             if (!data.success) {
                 statusDiv.className = "mt-2 text-center status-err";
-                statusDiv.innerHTML = `❌ ${data.error}`;
+                statusDiv.innerHTML = `${data.error}`;
             } else {
                 statusDiv.className = "mt-2 text-center status-ok";
-                statusDiv.innerHTML = `✅ ${data.message}`;
+                statusDiv.innerHTML = `${data.message}`;
             }
             await refreshBaseStatus();
         } catch (e) { }
@@ -1130,13 +1190,14 @@
         try {
             await navigator.clipboard.writeText(text);
             statusDiv.className = "mt-2 text-center status-ok";
-            statusDiv.innerHTML = "✅ Logs copied";
+            statusDiv.innerHTML = "Logs copied";
         } catch (e) {
             statusDiv.className = "mt-2 text-center status-err";
-            statusDiv.innerHTML = "❌ Copy failed";
+            statusDiv.innerHTML = "Copy failed";
         }
     }
 
     // Manual refresh only (no auto status refresh)
     updateReadWriteButtons();
+    updateSampleRateHint();
     refreshLogs();

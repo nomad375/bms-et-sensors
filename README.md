@@ -34,22 +34,59 @@ docker compose -f docker-compose.yml -f docker-compose.override.yml up -d
 
 ## Start commands
 
-- Local amd64 refresh:
+- Full local rebuild + restart (both app services):
 
 ```bash
 ./restart-local-amd64.sh
 ```
 
-- Build local images for current arch:
+- Build/restart both app services:
 
 ```bash
 ./build-local-all.sh
 ```
 
-- Build and push multi-arch images:
+- Build/restart only MSCL:
+
+```bash
+./build-local-mscl.sh
+```
+
+- Build/restart only RedLab:
+
+```bash
+./build-local-redlab.sh
+```
+
+- Fast MSCL restart in dev mode (bind-mounted `./app/mscl`):
+
+```bash
+./restart-mscl-dev.sh
+```
+
+- Build and push multi-arch images to Docker Hub:
 
 ```bash
 ./build-push-multiarch.sh
+```
+
+## Dev workflow (mscl-app)
+
+- The MSCL container now bind-mounts code from host: `./app/mscl:/app` (see `docker-compose.override.yml`).
+- `Flask reloader` is intentionally disabled, so runtime remains stable.
+- If you change only MSCL code/assets (`*.py`, `*.js`, `*.html`) in `app/mscl`, rebuild is not required:
+
+```bash
+./restart-mscl-dev.sh
+```
+
+- Rebuild `mscl-app` only when dependencies/image inputs changed:
+- `Dockerfile.mscl`
+- `app/mscl/requirements.txt`
+- system packages / base image assumptions
+
+```bash
+./build-local-mscl.sh
 ```
 
 ## Environment variables
@@ -70,7 +107,7 @@ Use `.env.example` as the baseline. Key variables:
 - `TEMP_MAX`
 
 ### MSCL app (optional advanced tuning)
-The app also supports runtime tuning via env variables (batch sizes, queue limits, stream cadence, offsets). Defaults are defined in `app/mscl_settings.py`.
+The app also supports runtime tuning via env variables (batch sizes, queue limits, stream cadence, offsets). Defaults are defined in `app/mscl/mscl_settings.py`.
 Additional stream options:
 - `MSCL_RESAMPLED_ENABLED`: writes an extra evenly spaced stream for visualization.
 - `MSCL_RESAMPLED_MEASUREMENT`: target measurement name for resampled points (default `mscl_sensors_resampled`).
@@ -143,3 +180,30 @@ Project tests are `unittest`-based:
 ```bash
 python -m unittest discover -s tests -q
 ```
+
+## Sampling Validation Snapshot
+
+Validation run on February 13, 2026:
+- Run artifacts: `tests/runs/20260213-193644/`
+- Node: `16904` (`TC-Link-200`)
+- Observed LPF options from node read: `294 Hz` only
+
+### Validated LPF × Sample Rate combinations
+
+| Low Pass Filter | Sample Rate | Test | Result |
+|---|---|---|---|
+| 294 Hz | 1 Hz (`113`) | start/stop, 90s | PASS |
+| 294 Hz | 2 Hz (`112`) | start/stop, 90s | PASS |
+| 294 Hz | 4 Hz (`111`) | start/stop, 90s | PASS |
+| 294 Hz | 8 Hz (`110`) | start/stop, 90s | PASS |
+| 294 Hz | 16 Hz (`109`) | start/stop, 90s | PASS |
+| 294 Hz | 64 Hz (`107`) | stability run, 300s | PASS |
+
+Additional idle/read/health checks:
+- Idle stability run: 150s
+- API errors: none
+- Read failures: none
+
+Notes:
+- Results above are node/firmware-specific and should be treated as a validated snapshot.
+- If firmware exposes additional LPF values later, repeat the same validation procedure before using new combinations in production.
