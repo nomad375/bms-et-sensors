@@ -4,6 +4,7 @@
 <head>
     <title>TC-Link-200 Configurator</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
     <style>
         body { padding: 20px; background-color: #f8f9fa; font-family: sans-serif; }
         .card { margin-bottom: 20px; border: none; box-shadow: 0 4px 10px rgba(0,0,0,0.1); border-radius: 10px; }
@@ -51,7 +52,7 @@
         #samplingRunStatus { font-size: 0.78rem !important; }
         #samplingPanel .sampling-run-row {
             display: grid;
-            grid-template-columns: repeat(5, minmax(0, 1fr));
+            grid-template-columns: repeat(4, minmax(0, 1fr));
             gap: 0.5rem;
             align-items: end;
         }
@@ -70,6 +71,22 @@
             #samplingPanel .sampling-run-row {
                 grid-template-columns: 1fr;
             }
+        }
+        .sampling-duration-group .form-control { min-width: 0; }
+        .section-card {
+            border-left: 4px solid #d0d7de;
+        }
+        .section-card[data-accent="hardware"] { border-left-color: #2b5cab; }
+        .section-card[data-accent="calibration"] { border-left-color: #2f855a; }
+        .section-card[data-accent="sampling"] { border-left-color: #805ad5; }
+        .section-card[data-accent="power"] { border-left-color: #b7791f; }
+        body.sampling-active #configCard {
+            opacity: 0.55;
+            pointer-events: none;
+        }
+        body.sampling-active #samplingPanel {
+            opacity: 1;
+            pointer-events: auto;
         }
         .memo-popover {
             position: relative;
@@ -140,7 +157,7 @@
 <body>
 <div class="container" style="max-width: 800px;">
     <div class="card p-3 shadow-sm bg-primary text-white d-flex flex-row justify-content-between align-items-center">
-        <h4 class="m-0">📡 TC-Link-200 Configurator</h4>
+        <h4 class="m-0"><i class="bi bi-broadcast"></i> TC-Link-200 Configurator</h4>
     </div>
 
     <div class="card p-4 shadow-sm">
@@ -150,32 +167,36 @@
                 <div id="baseStatusText" class="small text-muted base-status-text">Status: Unknown</div>
             </div>
             <div class="d-flex gap-2">
-                <button id="btnConnect" onclick="connectBase()" class="btn btn-outline-secondary btn-sm fw-bold">🔌 Connect</button>
-                <button id="btnDisconnect" onclick="disconnectBase()" class="btn btn-outline-secondary btn-sm fw-bold">⛔ Disconnect</button>
-                <button id="btnBeacon" onclick="toggleBeacon()" class="btn btn-outline-info btn-sm fw-bold">Beacon: ?</button>
+                <button id="btnConnect" onclick="connectBase()" class="btn btn-outline-secondary btn-sm fw-bold"><i class="bi bi-plug"></i> Connect</button>
+                <button id="btnDisconnect" onclick="disconnectBase()" class="btn btn-outline-secondary btn-sm fw-bold"><i class="bi bi-power"></i> Disconnect</button>
+                <button id="btnBeacon" onclick="toggleBeacon()" class="btn btn-outline-info btn-sm fw-bold"><i class="bi bi-broadcast-pin"></i> Beacon: ?</button>
                 <span class="text-muted align-self-center" title="Beacon ON keeps node sync/communication active. Beacon OFF is only for diagnostics/isolation and may make nodes unreachable.">ⓘ</span>
             </div>
         </div>
         <div id="baseStatusPill" class="status-pill status-err-pill mb-3">Disconnected</div>
         <div id="baseActionStatus" class="small fw-bold mb-2"></div>
 
-        <div class="row g-3 align-items-center">
+        <div class="row g-3 align-items-center" id="baseActionRow">
             <div class="col-md-4">
                 <div class="input-group">
                     <span class="input-group-text">Node ID</span>
                     <input type="number" id="nodeId" class="form-control" value="16904">
                 </div>
             </div>
-            <div class="col-md-8 d-flex gap-2 node-actions">
-                <button id="btnRead" onclick="readConfig()" class="btn btn-success fw-bold" disabled>READ</button>
-                <button id="btnSampling" onclick="toggleSamplingPanel()" class="btn btn-outline-success fw-bold">Sampling Run</button>
-                <button id="btnSetIdle" onclick="setNodeIdle()" class="btn btn-outline-primary fw-bold">Set to Idle</button>
-                <button id="btnSleep" onclick="setNodeSleep()" class="btn btn-outline-dark fw-bold">Sleep</button>
-                <button id="btnCyclePower" onclick="cycleNodePower()" class="btn btn-outline-primary fw-bold">Power Cycle</button>
-                <button id="btnClearStorage" onclick="clearStorage()" class="btn btn-outline-danger fw-bold" disabled>Clear Storage</button>
-                <button id="btnExportStorage" onclick="exportStorageCsv()" class="btn btn-outline-secondary fw-bold" disabled>Export CSV</button>
-                <button id="btnExportInflux" onclick="exportStorageToInflux()" class="btn btn-outline-secondary fw-bold" disabled>Export to Influx</button>
-                <button id="btnProbe" onclick="probeNode()" class="btn btn-outline-secondary fw-bold">🛰️ PROBE</button>
+            <div class="col-md-8">
+                <div class="d-flex gap-2 node-actions node-actions-primary">
+                    <button id="btnRead" onclick="readConfig()" class="btn btn-success fw-bold" disabled>Read</button>
+                    <button id="btnSampling" onclick="toggleSamplingPanel()" class="btn btn-outline-success fw-bold">Sampling Run</button>
+                    <button id="btnSetIdle" onclick="setNodeIdle()" class="btn btn-outline-primary fw-bold">Set to Idle</button>
+                </div>
+                <div class="d-flex gap-2 node-actions node-actions-secondary mt-2">
+                    <button id="btnSleep" onclick="setNodeSleep()" class="btn btn-outline-dark fw-bold">Sleep</button>
+                    <button id="btnCyclePower" onclick="cycleNodePower()" class="btn btn-outline-primary fw-bold">Power Cycle</button>
+                    <button id="btnClearStorage" onclick="clearStorage()" class="btn btn-outline-danger fw-bold" disabled>Clear Storage</button>
+                    <button id="btnExportStorage" onclick="exportStorageCsv()" class="btn btn-outline-secondary fw-bold" disabled>Export CSV</button>
+                    <button id="btnExportInflux" onclick="exportStorageToInflux()" class="btn btn-outline-secondary fw-bold" disabled>Export to Influx</button>
+                    <button id="btnProbe" onclick="probeNode()" class="btn btn-outline-secondary fw-bold"><i class="bi bi-satellite"></i> Probe</button>
+                </div>
             </div>
         </div>
         <div id="samplingPanel" class="border rounded p-3 mt-3 bg-light" style="display:none;">
@@ -203,17 +224,16 @@
                         <option value="for">for</option>
                     </select>
                 </div>
-                <div class="col-md-2 sampling-value-col">
-                    <label class="form-label fw-bold">Value</label>
-                    <input id="samplingRunDurationValue" type="number" min="1" value="60" class="form-control">
-                </div>
-                <div class="col-md-2 sampling-units-col">
-                    <label class="form-label fw-bold">Units</label>
-                    <select id="samplingRunDurationUnits" class="form-select">
-                        <option value="seconds" selected>Seconds</option>
-                        <option value="minutes">Minutes</option>
-                        <option value="hours">Hours</option>
-                    </select>
+                <div class="col-md-3 sampling-duration-group">
+                    <label class="form-label fw-bold">Duration</label>
+                    <div class="input-group">
+                        <input id="samplingRunDurationValue" type="number" min="1" value="60" class="form-control">
+                        <select id="samplingRunDurationUnits" class="form-select">
+                            <option value="seconds" selected>Seconds</option>
+                            <option value="minutes">Minutes</option>
+                            <option value="hours">Hours</option>
+                        </select>
+                    </div>
                 </div>
             </div>
             <div class="d-flex gap-2 mt-3">
@@ -224,6 +244,7 @@
             <div id="samplingRunStatus" class="small text-muted mt-2"></div>
         </div>
         <div id="readStatus" class="mt-2 text-center fw-bold small"></div>
+        <div id="readMeta" class="small text-muted text-center mt-1"></div>
     </div>
 
     <div id="configCard" style="display:none;">
@@ -232,8 +253,9 @@
                 Node Settings
                 <span class="ms-2 text-muted" title="LED quick guide: Green pulse = Idle. Single green blink every ~2s = Sampling. Blue during sampling = resynchronizing. Red = self-test error. Off = powered down.">ⓘ</span>
             </div>
-            <div class="border rounded p-3 mb-3 bg-light">
+            <div class="border rounded p-3 mb-3 bg-light section-card" data-accent="hardware">
                 <div class="fw-bold text-primary mb-3">Hardware</div>
+                <div class="small text-muted mb-2">Read node to populate hardware options and valid ranges.</div>
                 <div class="row mb-3">
                     <div class="col-md-4" id="transducerTypeWrap">
                         <label class="form-label fw-bold">Transducer Type</label>
@@ -264,6 +286,7 @@
                     <div class="col-md-4">
                         <label class="form-label fw-bold">Sample Rate</label>
                         <select id="sampleRate" class="form-select"></select>
+                        <div id="sampleRateHint" class="small text-muted mt-1"></div>
                     </div>
                     <div class="col-md-4" id="lowPassFilterWrap">
                         <label class="form-label fw-bold">Low Pass Filter</label>
@@ -313,7 +336,7 @@
                 </details>
             </div>
 
-            <div class="border rounded p-3 mb-3 bg-light">
+            <div class="border rounded p-3 mb-3 bg-light section-card" data-accent="calibration">
                 <div class="fw-bold text-primary mb-2">Calibration</div>
                 <div class="row">
                     <div class="col-md-6" id="calibrationUnitWrap">
@@ -333,7 +356,7 @@
                 </div>
             </div>
 
-            <div class="border rounded p-3 mb-3 bg-light">
+            <div class="border rounded p-3 mb-3 bg-light section-card" data-accent="sampling">
                 <div class="fw-bold text-primary mb-3">Sampling</div>
                 <div class="row mb-3">
                     <div class="col-md-6" id="dataModeWrap">
@@ -371,7 +394,7 @@
                 </div>
             </div>
 
-            <div class="border rounded p-3 mb-4 bg-light">
+            <div class="border rounded p-3 mb-4 bg-light section-card" data-accent="power">
                 <div class="fw-bold text-primary mb-3">Power</div>
                 <div class="row g-3">
                     <div class="col-md-6">
@@ -410,7 +433,7 @@
                 <div id="diagFlags" class="small text-muted"></div>
             </div>
 
-            <button id="btnWrite" onclick="applyConfig()" class="btn btn-primary w-100 fw-bold py-2" disabled>🛡️ WRITE CONFIG</button>
+            <button id="btnWrite" onclick="applyConfig()" class="btn btn-primary w-100 fw-bold py-2" disabled><i class="bi bi-shield-lock"></i> Write Config</button>
             <div id="writeStatus" class="mt-3 text-center fw-bold"></div>
         </div>
     </div>
@@ -419,8 +442,8 @@
         <div class="d-flex justify-content-between align-items-center mb-2">
             <div class="fw-bold">MSCL Logs</div>
             <div class="d-flex gap-2">
-                <button onclick="copyLogs()" class="btn btn-outline-secondary btn-sm fw-bold" title="Copy logs to clipboard">📋 Copy</button>
-                <button onclick="refreshLogs()" class="btn btn-outline-secondary btn-sm fw-bold">↻ Refresh</button>
+                <button onclick="copyLogs()" class="btn btn-outline-secondary btn-sm fw-bold" title="Copy logs to clipboard"><i class="bi bi-clipboard"></i> Copy</button>
+                <button onclick="refreshLogs()" class="btn btn-outline-secondary btn-sm fw-bold"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
             </div>
         </div>
         <div id="logBox" class="log-box">Logs will appear here…</div>
