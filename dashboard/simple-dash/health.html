@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>System Health</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #111827;
+      --text: #e5e7eb;
+      --muted: #94a3b8;
+      --ok: #22c55e;
+      --warn: #f59e0b;
+      --err: #ef4444;
+      --border: #1f2937;
+    }
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: radial-gradient(circle at top, #1f2937, var(--bg));
+      color: var(--text);
+    }
+    .wrap {
+      max-width: 900px;
+      margin: 32px auto;
+      padding: 0 16px;
+    }
+    .top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 28px;
+    }
+    .meta {
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 12px;
+    }
+    .card {
+      background: rgba(17, 24, 39, 0.88);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px;
+    }
+    .name {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+    .status {
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .ok { background: rgba(34, 197, 94, 0.2); color: var(--ok); }
+    .warn { background: rgba(245, 158, 11, 0.2); color: var(--warn); }
+    .err { background: rgba(239, 68, 68, 0.2); color: var(--err); }
+    .details { color: var(--muted); font-size: 13px; word-break: break-word; }
+    a { color: #93c5fd; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <h1>System Health</h1>
+      <div class="meta">
+        Auto-refresh: 5s<br />
+        <span id="updated">updated: -</span>
+      </div>
+    </div>
+
+    <div class="grid" id="grid"></div>
+
+    <p class="meta" style="margin-top: 16px;">
+      MQTT broker (Mosquitto) has no native HTTP health endpoint.
+      Connectivity is inferred from Telegraf MQTT input status.
+    </p>
+    <p><a href="/">Back to Dashboard</a></p>
+  </div>
+
+  <script>
+    const services = [
+      { id: 'mscl', name: 'MSCL API', url: '/probe/mscl', type: 'json', pass: (d) => d && d.status === 'ok' },
+      { id: 'influx', name: 'InfluxDB', url: '/probe/influx', type: 'json', pass: (d) => d && d.status === 'pass' },
+      { id: 'grafana', name: 'Grafana', url: '/probe/grafana', type: 'json', pass: (d) => d && String(d.database).toLowerCase() === 'ok' },
+      { id: 'telegraf', name: 'Telegraf', url: '/probe/telegraf', type: 'text', pass: (t) => t.includes('go_goroutines') },
+      { id: 'z2m', name: 'Zigbee2MQTT', url: '/probe/z2m', type: 'text', pass: (t) => t.toLowerCase().includes('<html') || t.toLowerCase().includes('zigbee2mqtt') },
+    ];
+
+    const grid = document.getElementById('grid');
+
+    function mkCard(s) {
+      const el = document.createElement('div');
+      el.className = 'card';
+      el.innerHTML = `
+        <div class="name">
+          <span>${s.name}</span>
+          <span class="status warn" id="st-${s.id}">checking</span>
+        </div>
+        <div class="details" id="dt-${s.id}">-</div>
+      `;
+      grid.appendChild(el);
+    }
+
+    services.forEach(mkCard);
+
+    function setState(id, level, text, details) {
+      const st = document.getElementById(`st-${id}`);
+      const dt = document.getElementById(`dt-${id}`);
+      st.className = `status ${level}`;
+      st.textContent = text;
+      dt.textContent = details;
+    }
+
+    async function probe(s) {
+      try {
+        const res = await fetch(s.url, { cache: 'no-store' });
+        if (!res.ok) {
+          setState(s.id, 'err', 'down', `HTTP ${res.status}`);
+          return;
+        }
+
+        if (s.type === 'json') {
+          const data = await res.json();
+          const ok = s.pass(data);
+          setState(s.id, ok ? 'ok' : 'warn', ok ? 'up' : 'degraded', JSON.stringify(data));
+        } else {
+          const text = await res.text();
+          const ok = s.pass(text);
+          setState(s.id, ok ? 'ok' : 'warn', ok ? 'up' : 'degraded', text.slice(0, 120).replace(/\s+/g, ' '));
+        }
+      } catch (e) {
+        setState(s.id, 'err', 'down', e.message || 'request failed');
+      }
+    }
+
+    async function refreshAll() {
+      await Promise.all(services.map(probe));
+      document.getElementById('updated').textContent = `updated: ${new Date().toLocaleTimeString()}`;
+    }
+
+    refreshAll();
+    setInterval(refreshAll, 5000);
+  </script>
+</body>
+</html>

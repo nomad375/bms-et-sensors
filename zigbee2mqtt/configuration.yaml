@@ -1,0 +1,19 @@
+homeassistant:
+  enabled: false
+mqtt:
+  server: mqtt://mosquitto:1883
+  base_topic: zigbee2mqtt
+serial:
+  port: /dev/ttyACM0
+  adapter: ember
+frontend:
+  enabled: true
+  port: 8080
+advanced:
+  log_level: info
+version: 5
+devices:
+  '0x00158d000a982ee2':
+    friendly_name: '0x00158d000a982ee2'
+blocklist:
+  - '0x4c5bb3fffe8389cd'

@@ -6,6 +6,10 @@ Docker stack for sensor data acquisition and visualization:
 - `influxdb`: time-series storage.
 - `grafana`: dashboards.
 - `dashboard`: lightweight start page based on `simple-dash`, served by `nginx`.
+- `mosquitto`: MQTT broker.
+- `mqtt-explorer`: browser UI for MQTT topics and payloads.
+- `zigbee2mqtt`: Zigbee bridge for `ZBDongle-E`.
+- `telegraf`: MQTT-to-InfluxDB bridge.
 
 ## Requirements
 
@@ -33,6 +37,9 @@ docker compose -f docker-compose.yml -f docker-compose.override.yml up -d
 - InfluxDB: `http://<host>:8086`
 - Grafana: `http://<host>:3000`
 - Dashboard: `http://<host>:80`
+- System health page: `http://<host>/health.html`
+- Zigbee2MQTT frontend: `http://<host>:8082`
+- MQTT Explorer: `http://<host>:9001`
 
 ## Start commands
 
@@ -104,6 +111,16 @@ Use `.env.example` as the baseline. Key variables:
 - `GRAFANA_ADMIN_PASSWORD`
 - `GRAFANA_ACCESS_ADDRESS`
 
+### MQTT / Zigbee2MQTT / Telegraf
+- `MQTT_PORT`
+- `MQTT_EXPLORER_PORT`
+- `Z2M_FRONTEND_PORT`
+- `Z2M_BASE_TOPIC`
+- `TELEGRAF_METRICS_PORT`
+- `Z2M_SERIAL_PORT`
+- `Z2M_SERIAL_ADAPTER`
+- `TZ`
+
 ### RedLab collector
 - `TEMP_MIN`
 - `TEMP_MAX`
@@ -154,6 +171,12 @@ iperf3 -s
 ```bash
 pkill -f "iperf3 --server"
 ```
+
+### MQTT + Zigbee2MQTT files
+
+- Mosquitto config: `mosquitto/config/mosquitto.conf`
+- Zigbee2MQTT config/data: `zigbee2mqtt/configuration.yaml`
+- Telegraf config: `telegraf/telegraf.conf`
 
 ### Dashboard (simple-dash + nginx)
 

@@ -2,6 +2,11 @@
   "title": "BMS ET Sensors Dashboard",
   "items": [
     {
+      "alt": "System Health",
+      "icon": "fas fa-stethoscope",
+      "link": "http://{{host}}/health.html"
+    },
+    {
       "alt": "MSCL Configurator",
       "icon": "fas fa-sliders-h",
       "link": "http://{{host}}:5000"
@@ -15,6 +20,16 @@
       "alt": "InfluxDB",
       "icon": "fas fa-database",
       "link": "http://{{host}}:8086"
+    },
+    {
+      "alt": "Zigbee2MQTT",
+      "icon": "fas fa-wifi",
+      "link": "http://{{host}}:8082"
+    },
+    {
+      "alt": "MQTT Explorer",
+      "icon": "fas fa-project-diagram",
+      "link": "http://{{host}}:9001"
     }
   ]
 }

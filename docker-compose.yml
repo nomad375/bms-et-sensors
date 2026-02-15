@@ -75,7 +75,67 @@ services:
       - "${DASHBOARD_PORT:-80}:80"
     volumes:
       - ./dashboard/simple-dash:/usr/share/nginx/html:ro
+      - ./dashboard/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
     restart: always
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: mosquitto
+    restart: always
+    ports:
+      - "${MQTT_PORT:-1883}:1883"
+    volumes:
+      - ./mosquitto/config/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./mosquitto/data:/mosquitto/data
+      - ./mosquitto/log:/mosquitto/log
+
+  mqtt-explorer:
+    image: smeagolworms4/mqtt-explorer:latest
+    container_name: mqtt-explorer
+    restart: always
+    depends_on:
+      - mosquitto
+    ports:
+      - "${MQTT_EXPLORER_PORT:-9001}:9001"
+    environment:
+      - HTTP_PORT=9001
+      - CONFIG_PATH=/mqtt-explorer/config
+    volumes:
+      - ./mqtt-explorer/config:/mqtt-explorer/config
+
+  zigbee2mqtt:
+    image: koenkk/zigbee2mqtt:latest
+    container_name: zigbee2mqtt
+    user: "0:0"
+    privileged: true
+    restart: always
+    depends_on:
+      - mosquitto
+    ports:
+      - "${Z2M_FRONTEND_PORT:-8082}:8080"
+    environment:
+      - TZ=${TZ:-UTC}
+      - ZIGBEE2MQTT_CONFIG_MQTT_BASE_TOPIC=${Z2M_BASE_TOPIC:-zigbee2mqtt}
+      - ZIGBEE2MQTT_CONFIG_SERIAL_PORT=${Z2M_SERIAL_PORT}
+      - ZIGBEE2MQTT_CONFIG_SERIAL_ADAPTER=${Z2M_SERIAL_ADAPTER:-ember}
+    volumes:
+      - ./zigbee2mqtt:/app/data
+      - /dev:/dev
+
+  telegraf:
+    image: telegraf:1.33
+    container_name: telegraf
+    restart: always
+    env_file: .env
+    ports:
+      - "${TELEGRAF_METRICS_PORT:-9273}:9273"
+    depends_on:
+      influxdb:
+        condition: service_healthy
+      mosquitto:
+        condition: service_started
+    volumes:
+      - ./telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro
 
 volumes:
   influxdb_data:

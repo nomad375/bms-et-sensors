@@ -16,3 +16,18 @@ __pycache__/
 
 # Local test run artifacts
 tests/runs/
+
+# MQTT / Zigbee2MQTT runtime artifacts
+mosquitto/data/*
+!mosquitto/data/.gitkeep
+mosquitto/log/*
+!mosquitto/log/.gitkeep
+mqtt-explorer/config/*.json
+zigbee2mqtt/coordinator_backup.json
+zigbee2mqtt/database.db
+zigbee2mqtt/database.db-*
+zigbee2mqtt/log/*
+zigbee2mqtt/state.json
+zigbee2mqtt/networkmap/*
+zigbee2mqtt/configuration_backup_v*.yaml
+zigbee2mqtt/migration-*.log
