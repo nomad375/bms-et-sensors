@@ -1,6 +1,6 @@
 import unittest
 
-from app.mscl_write_apply_service import apply_write_connected
+from app.mscl.mscl_write_apply_service import apply_write_connected
 
 
 class _FakeMask:

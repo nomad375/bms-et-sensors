@@ -1,6 +1,6 @@
 import unittest
 
-from app.mscl_write_payload_helpers import normalize_write_payload, to_opt_bool, to_opt_int
+from app.mscl.mscl_write_payload_helpers import normalize_write_payload, to_opt_bool, to_opt_int
 
 
 class WritePayloadHelpersTests(unittest.TestCase):

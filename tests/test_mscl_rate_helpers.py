@@ -1,6 +1,6 @@
 import unittest
 
-from app.mscl_rate_helpers import (
+from app.mscl.mscl_rate_helpers import (
     filter_sample_rates_for_model,
     is_tc_link_200_model,
     rate_label_to_hz,

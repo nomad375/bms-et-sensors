@@ -1,7 +1,7 @@
 import unittest
 
-from app.mscl_stream_helpers import ns_to_iso_utc
-from app.mscl_utils import sample_rate_text_to_hz
+from app.mscl.mscl_stream_helpers import ns_to_iso_utc
+from app.mscl.mscl_utils import sample_rate_text_to_hz
 
 
 class StreamHelpersTests(unittest.TestCase):

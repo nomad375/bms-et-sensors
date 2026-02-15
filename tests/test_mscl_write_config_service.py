@@ -1,6 +1,6 @@
 import unittest
 
-from app.mscl_write_config_service import build_write_config
+from app.mscl.mscl_write_config_service import build_write_config
 
 
 class _FakeCfg:

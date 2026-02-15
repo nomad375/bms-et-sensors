@@ -1,6 +1,6 @@
 import unittest
 
-from app.mscl_sampling_run_service import start_sampling_run
+from app.mscl.mscl_sampling_run_service import start_sampling_run
 
 
 class _FakeState:

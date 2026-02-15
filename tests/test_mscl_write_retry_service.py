@@ -1,6 +1,6 @@
 import unittest
 
-from app.mscl_write_retry_service import run_write_retry_loop
+from app.mscl.mscl_write_retry_service import run_write_retry_loop
 
 
 class WriteRetryServiceTests(unittest.TestCase):

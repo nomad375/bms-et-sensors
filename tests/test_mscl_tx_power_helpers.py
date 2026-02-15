@@ -1,6 +1,6 @@
 import unittest
 
-from app.mscl_tx_power_helpers import (
+from app.mscl.mscl_tx_power_helpers import (
     allowed_tx_powers,
     normalize_tx_power,
     tx_power_to_enum,

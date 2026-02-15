@@ -70,7 +70,7 @@ def _install_fake_influx_modules():
 
 
 FakeWriteApi = _install_fake_influx_modules()
-from app.mscl_backfill_service import backfill_rows_to_influx_stream  # noqa: E402
+from app.mscl.mscl_backfill_service import backfill_rows_to_influx_stream  # noqa: E402
 
 
 class BackfillServiceTests(unittest.TestCase):

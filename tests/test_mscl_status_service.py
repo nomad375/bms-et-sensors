@@ -1,6 +1,6 @@
 import unittest
 
-from app.mscl_status_service import build_status_payload, comm_age_sec, compute_link_health
+from app.mscl.mscl_status_service import build_status_payload, comm_age_sec, compute_link_health
 
 
 class _FakeBase:

@@ -1,6 +1,6 @@
 import unittest
 
-from app.mscl_health_service import build_health_payload
+from app.mscl.mscl_health_service import build_health_payload
 
 
 class _FakeState:

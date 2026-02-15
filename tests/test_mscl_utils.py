@@ -1,6 +1,6 @@
 import unittest
 
-from app.mscl_utils import sample_rate_text_to_hz
+from app.mscl.mscl_utils import sample_rate_text_to_hz
 
 
 class SampleRateTextToHzTests(unittest.TestCase):

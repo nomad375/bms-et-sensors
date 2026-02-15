@@ -1,6 +1,6 @@
 import unittest
 
-from app.mscl_write_request_helpers import WriteRequestValidationError, validate_write_request
+from app.mscl.mscl_write_request_helpers import WriteRequestValidationError, validate_write_request
 
 
 class WriteRequestHelpersTests(unittest.TestCase):

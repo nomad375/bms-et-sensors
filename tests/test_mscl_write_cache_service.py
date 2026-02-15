@@ -1,6 +1,6 @@
 import unittest
 
-from app.mscl_write_cache_service import update_write_cache
+from app.mscl.mscl_write_cache_service import update_write_cache
 
 
 class WriteCacheServiceTests(unittest.TestCase):

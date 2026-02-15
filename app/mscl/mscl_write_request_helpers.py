@@ -1,7 +1,7 @@
 try:
     from mscl_write_payload_helpers import normalize_write_payload
 except ImportError:  # pragma: no cover - fallback for unit test import style
-    from app.mscl_write_payload_helpers import normalize_write_payload
+    from app.mscl.mscl_write_payload_helpers import normalize_write_payload
 
 
 class WriteRequestValidationError(ValueError):

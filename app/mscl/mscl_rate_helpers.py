@@ -3,7 +3,7 @@ from typing import Optional
 try:
     from mscl_utils import sample_rate_text_to_hz
 except ImportError:  # pragma: no cover - test/module import path fallback
-    from app.mscl_utils import sample_rate_text_to_hz
+    from app.mscl.mscl_utils import sample_rate_text_to_hz
 
 
 def is_tc_link_200_model(model) -> bool:

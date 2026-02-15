@@ -1,6 +1,6 @@
 import unittest
 
-from app.mscl_offset_service import compute_export_clock_offset_ns
+from app.mscl.mscl_offset_service import compute_export_clock_offset_ns
 
 
 class OffsetServiceTests(unittest.TestCase):
