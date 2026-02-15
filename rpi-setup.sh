@@ -6,7 +6,7 @@ echo " Raspberry Pi DAQ Stack Setup Utility"
 echo "==========================================="
 
 PROJECT_DIR="${PROJECT_DIR:-$HOME/bms-et-sensors}"
-REPO_URL="${REPO_URL:-https://github.com/nomad375/redlab-daq-project.git}"
+REPO_URL="${REPO_URL:-https://github.com/nomad375/bms-et-sensors.git}"
 REPO_BRANCH="${REPO_BRANCH:-main}"
 DOCKER_CMD=(docker)
 COMPOSE_CMD=(docker compose)
