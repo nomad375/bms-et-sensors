@@ -169,8 +169,22 @@ def _feature_supported(features, method_name):
 
 
 def find_port():
-    ports = glob.glob("/dev/ttyACM*") + glob.glob("/dev/ttyUSB*")
-    return ports[0] if ports else None
+    # 1) Explicit port from environment has highest priority.
+    configured = os.getenv("MSCL_PORT", "").strip()
+    if configured and os.path.exists(configured):
+        return configured
+
+    # 2) Then prefer stable by-id symlink for WSDA base station.
+    wsda_by_id = sorted(glob.glob("/dev/serial/by-id/*WSDA-Base-200*"))
+    if wsda_by_id:
+        return wsda_by_id[0]
+
+    # 3) Fallback: USB serial first, ACM second.
+    usb_ports = sorted(glob.glob("/dev/ttyUSB*"))
+    if usb_ports:
+        return usb_ports[0]
+    acm_ports = sorted(glob.glob("/dev/ttyACM*"))
+    return acm_ports[0] if acm_ports else None
 
 
 def internal_connect(force_ping=False):
