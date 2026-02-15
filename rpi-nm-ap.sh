@@ -165,13 +165,16 @@ ensure_ethernet_autoconnect() {
     echo ">>> Ensure Ethernet autoconnect on '${ifn}' (no IP mode rewrite)"
 
     local existing=""
+    local cname="wired-auto-${ifn}"
     existing="$(nmcli -t -f NAME,TYPE,DEVICE connection show | awk -F: -v dev="${ifn}" '$2=="802-3-ethernet" && $3==dev {print $1; exit}')"
+    if [[ -z "${existing}" ]] && nmcli -t -f NAME connection show | grep -Fxq "${cname}"; then
+      existing="${cname}"
+    fi
 
     if [[ -n "${existing}" ]]; then
       run_nmcli connection modify "${existing}" connection.autoconnect yes || true
       run_nmcli connection up "${existing}" ifname "${ifn}" >/dev/null 2>&1 || true
     else
-      local cname="wired-auto-${ifn}"
       run_nmcli connection add type ethernet ifname "${ifn}" con-name "${cname}" autoconnect yes ipv4.method auto ipv6.method auto
       run_nmcli connection up "${cname}" ifname "${ifn}" >/dev/null 2>&1 || true
     fi

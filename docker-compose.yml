@@ -68,6 +68,15 @@ services:
       - influxdb
     restart: always
 
+  dashboard:
+    image: nginx:latest
+    container_name: dashboard
+    ports:
+      - "${DASHBOARD_PORT:-80}:80"
+    volumes:
+      - ./dashboard/simple-dash:/usr/share/nginx/html:ro
+    restart: always
+
 volumes:
   influxdb_data:
   grafana_data:

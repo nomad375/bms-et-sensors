@@ -1,0 +1,20 @@
+{
+  "title": "BMS ET Sensors Dashboard",
+  "items": [
+    {
+      "alt": "MSCL Configurator",
+      "icon": "fas fa-sliders-h",
+      "link": "http://{{host}}:5000"
+    },
+    {
+      "alt": "Grafana",
+      "icon": "fas fa-chart-line",
+      "link": "http://{{host}}:3000"
+    },
+    {
+      "alt": "InfluxDB",
+      "icon": "fas fa-database",
+      "link": "http://{{host}}:8086"
+    }
+  ]
+}

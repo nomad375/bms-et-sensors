@@ -5,6 +5,7 @@ Docker stack for sensor data acquisition and visualization:
 - `redlab-app`: MCC RedLab thermocouple collector.
 - `influxdb`: time-series storage.
 - `grafana`: dashboards.
+- `dashboard`: lightweight start page based on `simple-dash`, served by `nginx`.
 
 ## Requirements
 
@@ -31,6 +32,7 @@ docker compose -f docker-compose.yml -f docker-compose.override.yml up -d
 - MSCL web UI/API: `http://<host>:5000`
 - InfluxDB: `http://<host>:8086`
 - Grafana: `http://<host>:3000`
+- Dashboard: `http://<host>:80`
 
 ## Start commands
 
@@ -138,6 +140,31 @@ curl -s http://localhost:5000/api/health
 ```bash
 curl -s http://localhost:5000/api/metrics
 ```
+
+### AP diagnostics services (iperf3)
+
+Use standard system commands:
+
+- Start temporary server:
+```bash
+iperf3 -s
+```
+
+- Stop existing server:
+```bash
+pkill -f "iperf3 --server"
+```
+
+### Dashboard (simple-dash + nginx)
+
+- Service: `dashboard` (`nginx:latest`)
+- Files served from: `dashboard/simple-dash`
+- Primary config file: `dashboard/simple-dash/config.json`
+- Port mapping: `${DASHBOARD_PORT:-80}:80`
+- `{{host}}` placeholder is supported in links and resolves to `window.location.hostname`
+
+`simple-dash` upstream:
+- https://github.com/wiesner-philipp/simple-dash
 
 ## Safe cleanup
 
