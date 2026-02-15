@@ -49,6 +49,18 @@ ensure_compose_plugin() {
   sudo apt-get install -y docker-compose-plugin
 }
 
+disable_modemmanager_if_present() {
+  if ! systemctl list-unit-files 2>/dev/null | grep -q "^ModemManager.service"; then
+    echo ">>> ModemManager service not found. Skipping."
+    return
+  fi
+
+  echo ">>> Disabling ModemManager (prevents USB serial capture on DAQ dongles)..."
+  sudo systemctl stop ModemManager.service || true
+  sudo systemctl disable ModemManager.service || true
+  sudo systemctl mask ModemManager.service || true
+}
+
 prepare_repo() {
   if [ ! -d "$PROJECT_DIR/.git" ]; then
     echo ">>> Cloning repository into $PROJECT_DIR"
@@ -100,6 +112,7 @@ install_prerequisites
 install_docker_if_needed
 resolve_docker_access
 ensure_compose_plugin
+disable_modemmanager_if_present
 prepare_repo
 prepare_env_file
 build_and_start_stack

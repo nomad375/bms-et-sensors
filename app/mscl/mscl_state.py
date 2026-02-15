@@ -169,15 +169,30 @@ def _feature_supported(features, method_name):
 
 
 def find_port():
+    def _normalize_port(path):
+        if not path:
+            return None
+        if not os.path.exists(path):
+            return None
+        # MSCL may fail on /dev/serial/by-id symlinks (it can open relative link target).
+        # Resolve to absolute tty device path for reliable open().
+        try:
+            return os.path.realpath(path)
+        except Exception:
+            return path
+
     # 1) Explicit port from environment has highest priority.
     configured = os.getenv("MSCL_PORT", "").strip()
-    if configured and os.path.exists(configured):
-        return configured
+    normalized = _normalize_port(configured)
+    if normalized:
+        return normalized
 
     # 2) Then prefer stable by-id symlink for WSDA base station.
     wsda_by_id = sorted(glob.glob("/dev/serial/by-id/*WSDA-Base-200*"))
     if wsda_by_id:
-        return wsda_by_id[0]
+        normalized = _normalize_port(wsda_by_id[0])
+        if normalized:
+            return normalized
 
     # 3) Fallback: USB serial first, ACM second.
     usb_ports = sorted(glob.glob("/dev/ttyUSB*"))
@@ -228,6 +243,8 @@ def internal_connect(force_ping=False):
         if not force_ping and (now - LAST_CONNECT_ATTEMPT_TS) < CONNECT_MIN_INTERVAL_SEC:
             return False, "Connect throttled"
         LAST_CONNECT_ATTEMPT_TS = now
+        if CURRENT_PORT and not os.path.exists(CURRENT_PORT):
+            CURRENT_PORT = None
         port = CURRENT_PORT or find_port()
         if not port:
             LAST_BASE_STATUS.update(
@@ -257,6 +274,8 @@ def internal_connect(force_ping=False):
             time.sleep(CONNECT_BACKOFF_SEC)
             return False, "Ping failed"
         except Exception as exc:
+            if "Invalid Com Port" in str(exc):
+                CURRENT_PORT = None
             LAST_BASE_STATUS.update(
                 {"connected": False, "port": port, "message": str(exc), "ts": time.strftime("%H:%M:%S")}
             )
