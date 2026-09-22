@@ -10,7 +10,7 @@ def _env_or_default(name: str, default: str) -> str:
     return value or default
 
 
-AP_INTERFACE = _env_or_default("AP_UI_INTERFACE", "wlan1")
+AP_INTERFACE = _env_or_default("AP_UI_INTERFACE", "wlan0")
 AP_PROFILE = _env_or_default("AP_UI_PROFILE", _env_or_default("AP_NAME", "rpi-ap"))
 AP_LEASE_FILE = _env_or_default(
     "AP_UI_LEASE_FILE",

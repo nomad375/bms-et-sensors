@@ -139,21 +139,43 @@ def messkluppe_flux(
     return query
 
 
-def matter_flux(*, bucket: str, measurement: str, start_expr: str, stop_expr: str | None, window: str) -> str:
+def matter_flux(
+    *,
+    bucket: str,
+    measurement: str,
+    start_expr: str,
+    stop_expr: str | None,
+    window: str,
+    cluster_id: str = "1026",
+    attribute_id: str | None = None,
+    scale: float | None = None,
+) -> str:
     bucket_q = json.dumps(bucket)
     measurement_q = json.dumps(measurement)
+    cluster_id_q = json.dumps(str(cluster_id))
+    attribute_id_q = json.dumps(str(attribute_id)) if attribute_id is not None else None
+    if str(cluster_id) == "1027" and str(attribute_id) == "16":
+        value_scale = 10.0
+    elif str(cluster_id) == "1027":
+        value_scale = 0.1
+    else:
+        value_scale = 100.0
+    if scale is not None:
+        value_scale = scale
     query = (
         f"from(bucket: {bucket_q})\n"
         + range_line(start_expr, stop_expr)
         + f"  |> filter(fn: (r) => r._measurement == {measurement_q})\n"
-        + '  |> filter(fn: (r) => r.event_type == "attribute_updated")\n'
-        + '  |> filter(fn: (r) => r.cluster_id == "1026")\n'
+        + '  |> filter(fn: (r) => r.event_type == "attribute_updated" or r.event_type == "poll_attribute")\n'
+        + f"  |> filter(fn: (r) => r.cluster_id == {cluster_id_q})\n"
         + '  |> filter(fn: (r) => r._field == "value")\n'
     )
+    if attribute_id_q is not None:
+        query += f"  |> filter(fn: (r) => r.attribute_id == {attribute_id_q})\n"
     if window and window != "__raw__":
         query += f"  |> aggregateWindow(every: {window}, fn: mean, createEmpty: false)\n"
-    query += '  |> map(fn: (r) => ({ r with _value: r._value / 100.0 }))\n'
-    query += '  |> keep(columns: ["_time", "_value", "source", "node_id", "endpoint_id", "cluster_id"])\n'
+    query += f"  |> map(fn: (r) => ({{ r with _value: r._value / {value_scale:.1f} }}))\n"
+    query += '  |> keep(columns: ["_time", "_value", "source", "node_id", "endpoint_id", "cluster_id", "attribute_id"])\n'
     return query
 
 

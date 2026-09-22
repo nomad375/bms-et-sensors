@@ -183,17 +183,37 @@ def messkluppe_csv_column_name(series_name: str) -> str:
 def matter_csv_column_name(series_name: str) -> str:
     node_id = ""
     endpoint_id = ""
+    cluster_id = ""
+    attribute_id = ""
     for part in str(series_name or "").split(" | "):
         part = part.strip()
         if part.startswith("node_id="):
             node_id = part.split("=", 1)[1]
         elif part.startswith("endpoint_id="):
             endpoint_id = part.split("=", 1)[1]
+        elif part.startswith("cluster_id="):
+            cluster_id = part.split("=", 1)[1]
+        elif part.startswith("attribute_id="):
+            attribute_id = part.split("=", 1)[1]
     parts = ["matter"]
     if node_id:
         parts.append(f"node_{_sanitize(node_id)}")
     if endpoint_id:
         parts.append(f"ep_{_sanitize(endpoint_id)}")
+    if cluster_id == "1026":
+        parts.append("temp")
+    elif cluster_id == "1029":
+        parts.append("humidity")
+    elif cluster_id == "1027":
+        parts.append("pressure_hpa")
+    elif cluster_id == "1068":
+        parts.append("pm1_ug_m3")
+    elif cluster_id == "1066":
+        parts.append("pm25_ug_m3")
+    elif cluster_id == "1069":
+        parts.append("pm10_ug_m3")
+    elif cluster_id:
+        parts.append(f"cluster_{_sanitize(cluster_id)}")
     return "_".join(parts) if len(parts) > 1 else "matter_unknown"
 
 

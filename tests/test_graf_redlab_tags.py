@@ -8,10 +8,11 @@ GRAF_APP_DIR = ROOT_DIR / "app" / "graf"
 if str(GRAF_APP_DIR) not in sys.path:
     sys.path.insert(0, str(GRAF_APP_DIR))
 
-from app.graf.graf_csv_helpers import messkluppe_csv_column_name, pyrometers_csv_column_name, redlab_csv_column_name
+from app.graf.graf_csv_helpers import matter_csv_column_name, messkluppe_csv_column_name, pyrometers_csv_column_name, redlab_csv_column_name
 from app.graf.graf_backend_services import _annotate_pyrometer_serials
 from app.graf.graf_query_builders import (
     matter_battery_flux,
+    matter_flux,
     messkluppe_flux,
     mscl_flux,
     pyrometers_flux,
@@ -168,6 +169,42 @@ class GrafRedLabTagTests(unittest.TestCase):
         self.assertIn('r.cluster_id == "47"', query)
         self.assertIn('r.attribute_id == "12"', query)
         self.assertIn("_value: r._value / 2.0", query)
+
+    def test_matter_flux_can_select_humidity_and_pressure_clusters(self):
+        humidity_query = matter_flux(
+            bucket="sensors",
+            measurement="matter_sensor",
+            start_expr="-5m",
+            stop_expr=None,
+            window="1s",
+            cluster_id="1029",
+        )
+        pressure_query = matter_flux(
+            bucket="sensors",
+            measurement="matter_sensor",
+            start_expr="-5m",
+            stop_expr=None,
+            window="1s",
+            cluster_id="1027",
+            attribute_id="16",
+        )
+
+        self.assertIn('r.cluster_id == "1029"', humidity_query)
+        self.assertIn('r.cluster_id == "1027"', pressure_query)
+        self.assertIn('r.attribute_id == "16"', pressure_query)
+        self.assertIn('r.event_type == "attribute_updated" or r.event_type == "poll_attribute"', humidity_query)
+        self.assertIn("_value: r._value / 100.0", humidity_query)
+        self.assertIn("_value: r._value / 10.0", pressure_query)
+
+    def test_matter_csv_column_name_includes_environment_cluster(self):
+        self.assertEqual(
+            matter_csv_column_name("source=matter-server | node_id=15 | endpoint_id=2 | cluster_id=1029"),
+            "matter_node_15_ep_2_humidity",
+        )
+        self.assertEqual(
+            matter_csv_column_name("source=matter-server | node_id=15 | endpoint_id=3 | cluster_id=1027"),
+            "matter_node_15_ep_3_pressure_hpa",
+        )
 
     def test_redlab_channel_state_preserves_device_channel_keys(self):
         with tempfile.TemporaryDirectory() as tmp:

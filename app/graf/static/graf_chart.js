@@ -161,6 +161,32 @@ function parseSeriesTags(name) {
   return tags;
 }
 
+const matterNodeAliases = {
+  "21": "Pico SPS30",
+  "25": "BMS-TES3-974744"
+};
+
+function prettyMatterName(rawName) {
+  const {
+    node_id: nodeId = "",
+    endpoint_id: endpointId = "",
+    cluster_id: clusterId = "",
+    attribute_id: attributeId = ""
+  } = parseSeriesTags(rawName);
+
+  const nodeLabel = matterNodeAliases[nodeId] || (nodeId ? `Matter N${nodeId}` : "Matter");
+  if (clusterId === "1026") return `${nodeLabel} Temp`;
+  if (clusterId === "1029") return `${nodeLabel} Humidity`;
+  if (clusterId === "1027" && attributeId === "16") return `${nodeLabel} Pressure hPa`;
+  if (clusterId === "1027") return `${nodeLabel} Pressure coarse`;
+  if (clusterId === "1068") return `${nodeLabel} PM1.0 ug/m3`;
+  if (clusterId === "1066") return `${nodeLabel} PM2.5 ug/m3`;
+  if (clusterId === "1069") return `${nodeLabel} PM10 ug/m3`;
+  if (clusterId === "47" && (!attributeId || attributeId === "12")) return `${nodeLabel} Battery`;
+  if (endpointId) return `${nodeLabel} EP${endpointId}`;
+  return nodeLabel;
+}
+
 function redlabDeviceName(rawName) {
   const name = String(rawName || "").trim();
   if (!name.startsWith("redlab:")) return "";
@@ -201,9 +227,7 @@ function prettySeriesName(rawName) {
   }
   if (name.includes("_field=force_") && name.includes("clip_id=")) return prettyMesskluppeName(name);
   if (name.includes("source=matter-server") && name.includes("node_id=")) {
-    const { node_id: nodeId = "", endpoint_id: endpointId = "" } = parseSeriesTags(name);
-    if (nodeId && endpointId) return `Matter N${nodeId} EP${endpointId}`;
-    if (nodeId) return `Matter N${nodeId}`;
+    return prettyMatterName(name);
   }
   if (name.startsWith("redlab:")) {
     const rest = name.slice("redlab:".length);
@@ -630,6 +654,7 @@ function drawChart(canvasId, series, xBounds = null) {
   const rawSeries = series || [];
   const displaySeries = applyChartDisplayFilters(canvasId, rawSeries);
   const visibleSeries = filterSeriesByChart(canvasId, displaySeries);
+  const scaledVisibleSeries = visibleSeries;
 
   let minX = 0;
   let maxX = 1;
@@ -637,8 +662,8 @@ function drawChart(canvasId, series, xBounds = null) {
   let maxY = 1;
   let autoMinY = 0;
   let autoMaxY = 1;
-  if (visibleSeries.length) {
-    const all = visibleSeries.flatMap(s => s.points);
+  if (scaledVisibleSeries.length) {
+    const all = scaledVisibleSeries.flatMap(s => s.points);
     minX = Math.min(...all.map(a => a.x));
     maxX = Math.max(...all.map(a => a.x));
     autoMinY = Math.min(...all.map(a => a.y));
@@ -656,9 +681,9 @@ function drawChart(canvasId, series, xBounds = null) {
     maxX = Number(xBounds.maxX);
   }
   const normMode = normalizeModes[canvasId];
-  let drawSeries = visibleSeries;
-  if (normMode && visibleSeries.length) {
-    drawSeries = visibleSeries.map(s => {
+  let drawSeries = scaledVisibleSeries;
+  if (normMode && scaledVisibleSeries.length) {
+    drawSeries = scaledVisibleSeries.map(s => {
       const ys = s.points.map(p => p.y);
       const sMin = Math.min(...ys);
       const sMax = Math.max(...ys);

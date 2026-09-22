@@ -3,6 +3,13 @@
 __pycache__/
 *.pyc
 .env
+runtime/
+build/
+**/build/
+**/managed_components/
+nodes/*/*/build/
+nodes/*/*/managed_components/
+nodes/*/*/dependencies.lock
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

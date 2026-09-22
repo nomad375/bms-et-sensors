@@ -6,11 +6,15 @@ Firmware workspace for BMS DOA Matter nodes.
 
 - `esp32c6zero/matter-node` - Matter over Thread node for Waveshare-style `ESP32-C6-Zero`
 - `esp32c6DevKitC/matter-node` - Matter over Thread node for `ESP32-C6-DevKitC-1-N4`
-- `esp32c6Pico/matter-node` - Matter over Thread node for Waveshare `ESP32-C6-Pico`
+- `esp32c6Pico/matter-thread-node` - Matter over Thread node for Waveshare `ESP32-C6-Pico`
+- `esp32c6Pico/matter-wifi-node` - Matter over Wi-Fi node for Waveshare `ESP32-C6-Pico`
+- `esp32c6Pico/matter-wifi-sps30-node` - Matter over Wi-Fi air-quality node for Waveshare `ESP32-C6-Pico` with Sensirion `SPS30`
 - `seeedXiaoEsp32C6/matter-node` - Matter over Thread node for `Seeed Studio XIAO ESP32-C6` on Expansion Board Base v1.1
 - `esp32c3SuperMini/matter-node` - Matter over Wi-Fi node for `ESP32-C3-SuperMini`
+- `m5stickc/matter-node` - Matter over Wi-Fi node for first-generation `M5StickC`
 - `m5stickcPlus2/matter-node` - Matter over Wi-Fi node for `M5StickC Plus2`
 - `esp32sCam/camera-node` - Matter over Wi-Fi node for `ESP32-S-CAM` (camera runtime intentionally disabled)
+- `lilygoTEnergyS3/matter-wifi-node` - Matter over Wi-Fi node for `LILYGO T-Energy-S3`
 
 ## Documentation
 
@@ -20,8 +24,10 @@ Firmware workspace for BMS DOA Matter nodes.
 - [ESP32-C6-Pico](./ESP32-C6-Pico.md)
 - [Seeed XIAO ESP32-C6](./Seeed-XIAO-ESP32-C6.md)
 - [ESP32-C3-SuperMini](./ESP32-C3-SuperMini.md)
+- [M5StickC](./M5StickC.md)
 - [M5StickC Plus2](./M5StickC-Plus2.md)
 - [ESP32-S-CAM](./ESP32-S-CAM.md)
+- [LILYGO T-Energy-S3](./LILYGO-T-Energy-S3.md)
 
 ## Shared Components
 
@@ -57,6 +63,7 @@ OTA support is staged board-by-board.
 | `ESP32-C6-Pico` | Serial migration prepared | Uses two OTA app slots and Matter OTA Requestor. Keep NVS at `0x9000`; serial migration should be flashed without `erase-flash` so pairing data stays intact. |
 | `Seeed XIAO ESP32-C6` | Initial profile prepared | Uses the same OTA partition layout as the C6 Thread nodes. Serial migration and Matter OTA transfer still need hardware validation. |
 | `ESP32-C3-SuperMini` | Serial migration validated | Uses two OTA app slots and Matter OTA Requestor over Wi-Fi. Serial flashing to the OTA layout preserved Wi-Fi and Matter pairing on 2026-04-27; over-the-air transfer still needs validation. |
+| `M5StickC` | Initial serial target | Uses two OTA app slots and Matter OTA Requestor over Wi-Fi. First-generation board support uses 4 MB flash, AXP192 battery readings, and the smaller ST7735S display. |
 | `M5StickC Plus2` | Serial migration validated | Uses two OTA app slots and Matter OTA Requestor over Wi-Fi. Serial flashing to the OTA layout preserved pairing on 2026-05-18; generated `m5stickc_plus2_matter_node-ota.bin` is ready for provider-based OTA validation. Pairing code is MAC-derived and shown on the built-in display before commissioning. |
 
 For the DevKitC prototype, build with a clean OTA sdkconfig so existing local

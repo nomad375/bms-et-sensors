@@ -72,6 +72,15 @@ MATTER_STANDARD_COMMANDS: dict[tuple[int, str], dict[str, Any]] = {
     (6, "On"): {"payload": {}},
     (6, "Toggle"): {"payload": {}},
 }
+MATTER_POLL_ENVIRONMENT_ATTRIBUTES: tuple[tuple[int, str, str], ...] = (
+    (1, "1026", "0"),
+    (2, "1029", "0"),
+    (3, "1027", "0"),
+    (3, "1027", "16"),
+    (3, "1068", "0"),
+    (3, "1066", "0"),
+    (3, "1069", "0"),
+)
 
 _state_lock = threading.Lock()
 _influx_lock = threading.Lock()
@@ -337,7 +346,7 @@ def _control_target_action(target: str, action: str) -> dict[str, Any]:
         return {
             "success": False,
             "error": "host_restart_required",
-            "details": "Start or restart matter-server with ./scripts/restart-matter-server.sh so the Realtek BLE adapter is re-detected before container recreation.",
+            "details": "Start or restart matter-server with ./scripts/restart-matter-server.sh so the selected BLE mode is applied before container recreation.",
         }
 
     actions: list[str] = []
@@ -490,9 +499,44 @@ def _matter_node_snapshot_pending() -> bool:
         return _last_good_matter_nodes_snapshot is None and bool(_matter_nodes_snapshot_refresh_inflight)
 
 
+def _poll_target_node_ids() -> list[int]:
+    node_ids: list[int] = []
+    if MATTER_POLL_NODE_ID > 0:
+        node_ids.append(MATTER_POLL_NODE_ID)
+    try:
+        for node in _get_matter_node_snapshot_cached(blocking=False):
+            node_id = node.get("node_id")
+            if isinstance(node_id, int) and node_id > 0 and node_id not in node_ids:
+                node_ids.append(node_id)
+    except Exception as exc:
+        _log(f"matter poll target discovery failed: {exc}")
+    return node_ids
+
+
+def _poll_numeric_attribute(node_id: int, endpoint_id: int, cluster_id: str, attribute_id: str = "0") -> None:
+    value = _read_attribute_once(node_id, f"{endpoint_id}/{cluster_id}/{attribute_id}")
+    if not isinstance(value, (int, float)):
+        return
+    record = {
+        "event_type": "poll_attribute",
+        "tags": {
+            "node_id": str(node_id),
+            "endpoint_id": str(endpoint_id),
+            "cluster_id": cluster_id,
+            "attribute_id": attribute_id,
+        },
+        "fields": {"value": float(value)},
+    }
+    _bump("events_received")
+    _set_state(last_message_at=time.time(), last_event_type="poll_attribute")
+    _write_event(record)
+
+
 def _poll_node_snapshot_once() -> None:
     if MATTER_POLL_INTERVAL_SEC <= 0:
         return
+
+    target_node_ids = _poll_target_node_ids()
 
     local_temp_centi = _read_attribute_once(MATTER_POLL_NODE_ID, "1/513/0")
     heat_setpoint_centi = _read_attribute_once(MATTER_POLL_NODE_ID, "1/513/18")
@@ -511,24 +555,13 @@ def _poll_node_snapshot_once() -> None:
         _set_state(last_message_at=time.time(), last_event_type="poll_snapshot")
         _write_event(record)
 
-    for attribute_id in (11, 12, 26):
-        attribute_path = f"{MATTER_POLL_BATTERY_ENDPOINT_ID}/47/{attribute_id}"
-        value = _read_attribute_once(MATTER_POLL_NODE_ID, attribute_path)
-        if not isinstance(value, (int, float)):
-            continue
-        record = {
-            "event_type": "poll_attribute",
-            "tags": {
-                "node_id": str(MATTER_POLL_NODE_ID),
-                "endpoint_id": str(MATTER_POLL_BATTERY_ENDPOINT_ID),
-                "cluster_id": "47",
-                "attribute_id": str(attribute_id),
-            },
-            "fields": {"value": float(value)},
-        }
-        _bump("events_received")
-        _set_state(last_message_at=time.time(), last_event_type="poll_attribute")
-        _write_event(record)
+    if MATTER_POLL_NODE_ID > 0:
+        for attribute_id in (11, 12, 26):
+            _poll_numeric_attribute(MATTER_POLL_NODE_ID, MATTER_POLL_BATTERY_ENDPOINT_ID, "47", str(attribute_id))
+
+    for node_id in target_node_ids:
+        for endpoint_id, cluster_id, attribute_id in MATTER_POLL_ENVIRONMENT_ATTRIBUTES:
+            _poll_numeric_attribute(node_id, endpoint_id, cluster_id, attribute_id)
 
 
 def _poll_forever() -> None:

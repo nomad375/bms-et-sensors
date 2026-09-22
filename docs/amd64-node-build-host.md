@@ -359,8 +359,8 @@ fresh commissioning.
 ## Commissioning Reminder
 
 Compilation can happen on amd64, but commissioning should be performed on the
-runtime host where `matter-server`, OTBR, Thread credentials, and the external
-Realtek BLE adapter are configured.
+runtime host where `matter-server`, OTBR, Thread credentials, and the selected
+BLE mode are configured.
 
 For fresh or factory-reset Thread devices:
 
@@ -416,8 +416,10 @@ Expected signs of a healthy build:
   - The board was erased or NVS moved. Normal `flash` preserves pairing only
     when the NVS partition remains compatible.
 - Commissioning fails after a clean flash
-  - Commission from the runtime host through the external Realtek BLE adapter,
-    using QR payload and no `network_only`.
+  - Commission from the runtime host through internal `hci0` BLE, using QR
+    payload and no `network_only`.
+  - For devices already reachable on IP, use `MATTER_BLE_MODE=disabled` and
+    commission with `network_only: true`.
 
 ## What Not To Copy To The Build Host
 

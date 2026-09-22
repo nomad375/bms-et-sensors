@@ -16,6 +16,9 @@ def load_dashboard_panels(
     load_messkluppe_battery_series_fn,
     load_messkluppe_temperature_series_fn,
     load_matter_series_fn,
+    load_matter_humidity_series_fn,
+    load_matter_pressure_series_fn,
+    load_matter_pm_series_fn,
     load_matter_battery_series_fn,
     panel_raw_cadence_ms_fn,
 ):
@@ -30,6 +33,9 @@ def load_dashboard_panels(
         "messkluppe_battery": [],
         "messkluppe_temperatures": [],
         "matter_temperature": [],
+        "matter_humidity": [],
+        "matter_pressure": [],
+        "matter_pm": [],
         "matter_battery": [],
     }
     panel_meta: dict[str, dict[str, Any]] = {
@@ -60,6 +66,12 @@ def load_dashboard_panels(
     if view_mode in {"all", "matter"}:
         panels["matter_temperature"] = load_matter_series_fn(start_expr, stop_expr, window, raw_mode)
         panel_meta["matter_temperature"]["raw_cadence_ms"] = panel_raw_cadence_ms_fn("matter_temperature", start_expr, stop_expr)
+        panels["matter_humidity"] = load_matter_humidity_series_fn(start_expr, stop_expr, window, raw_mode)
+        panel_meta["matter_humidity"]["raw_cadence_ms"] = panel_raw_cadence_ms_fn("matter_humidity", start_expr, stop_expr)
+        panels["matter_pressure"] = load_matter_pressure_series_fn(start_expr, stop_expr, window, raw_mode)
+        panel_meta["matter_pressure"]["raw_cadence_ms"] = panel_raw_cadence_ms_fn("matter_pressure", start_expr, stop_expr)
+        panels["matter_pm"] = load_matter_pm_series_fn(start_expr, stop_expr, window, raw_mode)
+        panel_meta["matter_pm"]["raw_cadence_ms"] = panel_raw_cadence_ms_fn("matter_pm", start_expr, stop_expr)
         panels["matter_battery"] = load_matter_battery_series_fn(start_expr, stop_expr, window, raw_mode)
         panel_meta["matter_battery"]["raw_cadence_ms"] = panel_raw_cadence_ms_fn("matter_battery", start_expr, stop_expr)
     return panels, panel_meta
@@ -110,6 +122,7 @@ def build_all_export_response(
     load_pyrometers_series_fn,
     load_messkluppe_series_fn,
     load_matter_series_fn,
+    load_matter_environment_series_fn,
     append_series_rows_fn,
     csv_export_response_fn,
     mscl_csv_column_name_fn,
@@ -131,7 +144,7 @@ def build_all_export_response(
     redlab_series = load_redlab_series_fn(start_expr, stop_expr, window, raw_mode)
     pyrometers_series = load_pyrometers_series_fn(start_expr, stop_expr, window, raw_mode)
     messkluppe_series = load_messkluppe_series_fn(start_expr, stop_expr, window, raw_mode)
-    matter_series = load_matter_series_fn(start_expr, stop_expr, window, raw_mode)
+    matter_series = load_matter_environment_series_fn(start_expr, stop_expr, window, raw_mode)
 
     by_ts: dict[str, dict[str, Any]] = {}
     cols: set[str] = set()

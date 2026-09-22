@@ -662,7 +662,7 @@ INDEX_HTML = """<!doctype html>
         </div>
       </div>
       <div id="wifiApMaster" class="topology-list">
-        <div class="topology-empty">Waiting for wlan1 access point...</div>
+        <div class="topology-empty">Waiting for Wi-Fi access point...</div>
       </div>
       <div class="raw-head" style="margin-top:12px;">
         <div class="raw-left">
@@ -952,7 +952,7 @@ INDEX_HTML = """<!doctype html>
       const ap = apStatus || {};
       const profile = ap.profile || {};
       if (!Object.keys(ap).length || ap.status === "unavailable") {
-        el.innerHTML = '<div class="topology-empty">wlan1 access point status unavailable.</div>';
+        el.innerHTML = '<div class="topology-empty">Wi-Fi access point status unavailable.</div>';
         return;
       }
       const badges = [
@@ -960,7 +960,7 @@ INDEX_HTML = """<!doctype html>
         stateBadge(ap.active ? "online" : "offline", ap.active ? "status-ok" : "status-warn"),
       ];
       const meta = [
-        `interface ${esc(ap.interface || profile.interface_name || "wlan1")}`,
+        `interface ${esc(ap.interface || profile.interface_name || "wlan0")}`,
         profile.ssid ? `ssid ${esc(profile.ssid)}` : "",
         profile.channel ? `ch ${esc(profile.channel)}` : "",
         ap.client_count != null ? `clients ${esc(ap.client_count)}` : "",
@@ -972,7 +972,7 @@ INDEX_HTML = """<!doctype html>
       el.innerHTML = `
         <div class="topology-node">
           <div class="topology-title">
-            <div class="topology-name">${esc(profile.name || ap.active_connection || "wlan1 access point")}</div>
+            <div class="topology-name">${esc(profile.name || ap.active_connection || "Wi-Fi access point")}</div>
             <div class="topology-badges">${badges.join("")}</div>
           </div>
           <div class="topology-meta">${meta.map((item) => `<span>${item}</span>`).join("")}</div>

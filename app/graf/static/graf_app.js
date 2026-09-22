@@ -64,6 +64,9 @@
           c8: toXY(data.panels.messkluppe_battery || []),
           c9: toXY(data.panels.messkluppe_temperatures || []),
           c10: toXY(data.panels.matter_battery || []),
+          c11: toXY(data.panels.matter_humidity || []),
+          c12: toXY(data.panels.matter_pressure || []),
+          c13: toXY(data.panels.matter_pm || []),
         };
         const panelMeta = data.panel_meta || {};
         panelMetaByChart.c1 = panelMeta.redlab_temperature || {};
@@ -76,6 +79,9 @@
         panelMetaByChart.c8 = panelMeta.messkluppe_battery || {};
         panelMetaByChart.c9 = panelMeta.messkluppe_temperatures || {};
         panelMetaByChart.c10 = panelMeta.matter_battery || {};
+        panelMetaByChart.c11 = panelMeta.matter_humidity || {};
+        panelMetaByChart.c12 = panelMeta.matter_pressure || {};
+        panelMetaByChart.c13 = panelMeta.matter_pm || {};
         const xMin = new Date(data.window_from_utc || "").getTime();
         const xMax = new Date(data.window_to_utc || "").getTime();
         const xBounds = Number.isFinite(xMin) && Number.isFinite(xMax) && xMax > xMin

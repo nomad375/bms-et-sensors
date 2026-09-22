@@ -258,13 +258,26 @@ def build_backend_services(
             fields=fields,
         )
 
-    def matter_query(start_expr: str, stop_expr: str | None, window: str) -> str:
+    def matter_query(
+        start_expr: str,
+        stop_expr: str | None,
+        window: str,
+        cluster_id: str = "1026",
+        attribute_id: str | None = None,
+        scale: float | None = None,
+    ) -> str:
+        value_scale = scale
+        if value_scale is None:
+            value_scale = 10.0 if cluster_id == "1027" and attribute_id == "16" else 100.0
         return matter_flux(
             bucket=influx_bucket,
             measurement=matter_measurement,
             start_expr=start_expr,
             stop_expr=stop_expr,
             window=window,
+            cluster_id=cluster_id,
+            attribute_id=attribute_id,
+            scale=value_scale,
         )
 
     def matter_battery_query(start_expr: str, stop_expr: str | None, window: str) -> str:
@@ -329,6 +342,37 @@ def build_backend_services(
     def load_matter_series(start_expr: str, stop_expr: str | None, window: str, raw_mode: bool) -> list[dict[str, Any]]:
         del raw_mode
         return query_series(matter_query(start_expr, stop_expr, window), ["source", "node_id", "endpoint_id", "cluster_id"])
+
+    def load_matter_humidity_series(start_expr: str, stop_expr: str | None, window: str, raw_mode: bool) -> list[dict[str, Any]]:
+        del raw_mode
+        return query_series(matter_query(start_expr, stop_expr, window, "1029"), ["source", "node_id", "endpoint_id", "cluster_id"])
+
+    def load_matter_pressure_series(start_expr: str, stop_expr: str | None, window: str, raw_mode: bool) -> list[dict[str, Any]]:
+        del raw_mode
+        return query_series(
+            matter_query(start_expr, stop_expr, window, "1027", "16"),
+            ["source", "node_id", "endpoint_id", "cluster_id", "attribute_id"],
+        )
+
+    def load_matter_pm_series(start_expr: str, stop_expr: str | None, window: str, raw_mode: bool) -> list[dict[str, Any]]:
+        del raw_mode
+        series: list[dict[str, Any]] = []
+        for cluster_id in ("1068", "1066", "1069"):
+            series.extend(
+                query_series(
+                    matter_query(start_expr, stop_expr, window, cluster_id, "0", scale=1.0),
+                    ["source", "node_id", "endpoint_id", "cluster_id", "attribute_id"],
+                )
+            )
+        return series
+
+    def load_matter_environment_series(start_expr: str, stop_expr: str | None, window: str, raw_mode: bool) -> list[dict[str, Any]]:
+        series: list[dict[str, Any]] = []
+        series.extend(load_matter_series(start_expr, stop_expr, window, raw_mode))
+        series.extend(load_matter_humidity_series(start_expr, stop_expr, window, raw_mode))
+        series.extend(load_matter_pressure_series(start_expr, stop_expr, window, raw_mode))
+        series.extend(load_matter_pm_series(start_expr, stop_expr, window, raw_mode))
+        return series
 
     def load_matter_battery_series(start_expr: str, stop_expr: str | None, window: str, raw_mode: bool) -> list[dict[str, Any]]:
         del raw_mode
@@ -403,6 +447,28 @@ def build_backend_services(
                 ["source", "node_id", "endpoint_id", "cluster_id"],
             )
             return series_median_interval_ms(series, parse_iso_ts_fn)
+        if panel_key == "matter_humidity":
+            series = query_series(
+                tail_flux(matter_query(cadence_start_expr, cadence_stop_expr, "__raw__", "1029"), tail_n),
+                ["source", "node_id", "endpoint_id", "cluster_id"],
+            )
+            return series_median_interval_ms(series, parse_iso_ts_fn)
+        if panel_key == "matter_pressure":
+            series = query_series(
+                tail_flux(matter_query(cadence_start_expr, cadence_stop_expr, "__raw__", "1027", "16"), tail_n),
+                ["source", "node_id", "endpoint_id", "cluster_id", "attribute_id"],
+            )
+            return series_median_interval_ms(series, parse_iso_ts_fn)
+        if panel_key == "matter_pm":
+            series: list[dict[str, Any]] = []
+            for cluster_id in ("1068", "1066", "1069"):
+                series.extend(
+                    query_series(
+                        tail_flux(matter_query(cadence_start_expr, cadence_stop_expr, "__raw__", cluster_id, "0", scale=1.0), tail_n),
+                        ["source", "node_id", "endpoint_id", "cluster_id", "attribute_id"],
+                    )
+                )
+            return series_median_interval_ms(series, parse_iso_ts_fn)
         if panel_key == "matter_battery":
             series = query_series(
                 tail_flux(matter_battery_query(cadence_start_expr, cadence_stop_expr, "__raw__"), tail_n),
@@ -447,6 +513,10 @@ def build_backend_services(
         "load_messkluppe_battery_series_fn": load_messkluppe_battery_series,
         "load_messkluppe_temperature_series_fn": load_messkluppe_temperature_series,
         "load_matter_series_fn": load_matter_series,
+        "load_matter_humidity_series_fn": load_matter_humidity_series,
+        "load_matter_pressure_series_fn": load_matter_pressure_series,
+        "load_matter_pm_series_fn": load_matter_pm_series,
+        "load_matter_environment_series_fn": load_matter_environment_series,
         "load_matter_battery_series_fn": load_matter_battery_series,
         "panel_raw_cadence_ms_fn": panel_raw_cadence_ms,
         "csv_export_response_fn": csv_export_response,

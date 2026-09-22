@@ -1,36 +1,43 @@
 #include "driver/gpio.h"
 #include "driver/temperature_sensor.h"
 #include "esp_check.h"
+#include "esp_event.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_matter.h"
 #include "esp_matter_endpoint.h"
 #include "esp_matter_providers.h"
 #include "esp_matter_test_event_trigger.h"
-#include "esp_openthread.h"
-#include "esp_openthread_types.h"
-#include "esp_pm.h"
+#include "esp_netif.h"
 #include "esp_system.h"
+#include "esp_wifi_default.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "led_strip.h"
 #include "nvs_flash.h"
-#include "platform/ESP32/OpenthreadLauncher.h"
-#include "WS_TCA9554PWR.h"
+#include "sps30.h"
 
 #include "bms_node_core/device_info.h"
-#include "bms_node_core/thread_diagnostics.h"
 
 #include <app/server/Server.h>
 #include <app/TestEventTriggerDelegate.h>
+#include <app/clusters/boolean-state-server/boolean-state-cluster.h>
+#include <app/server-cluster/ServerClusterInterfaceRegistry.h>
 #include <credentials/DeviceAttestationCredsProvider.h>
 #include <credentials/examples/DeviceAttestationCredsExample.h>
+#include <data_model_provider/esp_matter_data_model_provider.h>
 #include <platform/CHIPDeviceLayer.h>
 #include <platform/DeviceInstanceInfoProvider.h>
 #include <clusters/BooleanState/AttributeIds.h>
 #include <clusters/BooleanState/ClusterId.h>
 #include <clusters/BasicInformation/AttributeIds.h>
 #include <clusters/BasicInformation/ClusterId.h>
+#include <clusters/Pm1ConcentrationMeasurement/AttributeIds.h>
+#include <clusters/Pm1ConcentrationMeasurement/ClusterId.h>
+#include <clusters/Pm10ConcentrationMeasurement/AttributeIds.h>
+#include <clusters/Pm10ConcentrationMeasurement/ClusterId.h>
+#include <clusters/Pm25ConcentrationMeasurement/AttributeIds.h>
+#include <clusters/Pm25ConcentrationMeasurement/ClusterId.h>
 #include <clusters/TemperatureMeasurement/AttributeIds.h>
 #include <clusters/TemperatureMeasurement/ClusterId.h>
 #include <platform/ConnectivityManager.h>
@@ -50,10 +57,10 @@ static const char *TAG = "bms_matter_node";
 
 constexpr bms_node_core::BoardIdentity kBoardIdentity = {
     .vendor_id            = 0xFFF1,
-    .product_id           = 0x8003,
+    .product_id           = 0x8008,
     .vendor_name          = "BMS DOA",
-    .product_name         = "ESP32-C6-Pico",
-    .serial_prefix        = "BMS-C6P-",
+    .product_name         = "ESP32-C6-Pico WiFi SPS30",
+    .serial_prefix        = "BMS-C6PWS-",
     .hw_version           = 1,
     .hw_version_str       = "v1.0",
     .software_version_str = MATTER_NODE_GIT_COMMIT,
@@ -70,9 +77,9 @@ namespace {
 
 constexpr gpio_num_t kRgbLedGpio = GPIO_NUM_8;
 constexpr gpio_num_t kBootButtonGpio = GPIO_NUM_9;
-constexpr gpio_num_t kExioSdaGpio = GPIO_NUM_22;
-constexpr gpio_num_t kExioSclGpio = GPIO_NUM_23;
-constexpr uint8_t kExioAllInputsMask = 0x7F;
+constexpr uart_port_t kSps30UartPort = UART_NUM_1;
+constexpr gpio_num_t kSps30TxGpio = GPIO_NUM_16;
+constexpr gpio_num_t kSps30RxGpio = GPIO_NUM_17;
 constexpr uint32_t kTelemetryPeriodMs = 5000;
 constexpr uint32_t kHeartbeatPeriodMs = 30000;
 constexpr uint32_t kButtonPollPeriodMs = 50;
@@ -89,7 +96,7 @@ constexpr uint8_t kLedBrightnessCap = 24;
 enum class IndicatorState : uint8_t {
     Boot,
     Commissioning,
-    ThreadDetached,
+    WiFiDisconnected,
     Running,
     CommissioningPreview,
     FactoryResetPreview,
@@ -99,8 +106,11 @@ enum class IndicatorState : uint8_t {
 struct DeviceContext {
     uint16_t temp_ep_id = 0;
     uint16_t button_ep_id = 0;
+    uint16_t air_quality_ep_id = 0;
     temperature_sensor_handle_t temp_handle = nullptr;
     led_strip_handle_t led_strip = nullptr;
+    Sps30Sensor sps30;
+    bool sps30_ready = false;
     bool button_pressed = false;
     uint8_t last_led_r = 0;
     uint8_t last_led_g = 0;
@@ -109,7 +119,7 @@ struct DeviceContext {
 };
 
 struct IndicatorCtx {
-    volatile bool thread_attached = false;
+    volatile bool wifi_connected = false;
     volatile bool commissioned = false;
     volatile bool window_open = false;
     volatile bool button_preview_commissioning = false;
@@ -153,6 +163,43 @@ BmsNodeTestEventTriggerHandler s_bms_test_event_trigger_handler;
 
 // Matter spec: temperature in 0.01 °C units (int16_t)
 int16_t to_matter_temp(float celsius) { return static_cast<int16_t>(celsius * 100.0f); }
+
+esp_err_t configure_wifi_hostname_from_serial()
+{
+    const char *hostname = s_device_info_provider.cached_serial_number();
+    if (!hostname || hostname[0] == '\0') {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t err = esp_event_loop_create_default();
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "Failed to create default event loop before hostname setup: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    err = esp_netif_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to initialize esp-netif before hostname setup: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    esp_netif_t *sta_netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (!sta_netif) {
+        sta_netif = esp_netif_create_default_wifi_sta();
+    }
+    if (!sta_netif) {
+        ESP_LOGW(TAG, "Failed to create Wi-Fi STA netif before hostname setup");
+        return ESP_FAIL;
+    }
+
+    err = esp_netif_set_hostname(sta_netif, hostname);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Wi-Fi DHCP hostname set to serial: %s", hostname);
+    } else {
+        ESP_LOGW(TAG, "Failed to set Wi-Fi DHCP hostname %s: %s", hostname, esp_err_to_name(err));
+    }
+    return err;
+}
 
 esp_err_t ensure_serial_number_attribute()
 {
@@ -210,7 +257,7 @@ const char *indicator_state_str(IndicatorState s)
     switch (s) {
     case IndicatorState::Boot:                  return "boot/white-pulse";
     case IndicatorState::Commissioning:         return "commissioning/blue-blink";
-    case IndicatorState::ThreadDetached:        return "thread-detached/yellow";
+    case IndicatorState::WiFiDisconnected:      return "wifi-disconnected/yellow";
     case IndicatorState::Running:               return "running/green";
     case IndicatorState::CommissioningPreview:  return "btn-preview-commissioning/blue-fast";
     case IndicatorState::FactoryResetPreview:   return "btn-preview-factory-reset/red-fast";
@@ -300,7 +347,7 @@ IndicatorState compute_indicator_state(uint32_t since_boot_ms)
     if (since_boot_ms < kBootIndicatorMs)         return IndicatorState::Boot;
     if (s_indicator.window_open)                  return IndicatorState::Commissioning;
     if (!s_indicator.commissioned)                return IndicatorState::Commissioning;
-    if (!s_indicator.thread_attached)             return IndicatorState::ThreadDetached;
+    if (!s_indicator.wifi_connected)              return IndicatorState::WiFiDisconnected;
     return IndicatorState::Running;
 }
 
@@ -317,7 +364,7 @@ void render_indicator(IndicatorState state, uint32_t tick_ms)
         set_led_color(0, 0, 255, on ? 255 : 0);
         break;
     }
-    case IndicatorState::ThreadDetached: {
+    case IndicatorState::WiFiDisconnected: {
         const bool on = blink_on(tick_ms, 1000);
         set_led_color(255, 200, 0, on ? 255 : 30);
         break;
@@ -353,13 +400,60 @@ esp_err_t update_temperature_measurement(float temperature_c)
                   &temp_val);
 }
 
+esp_err_t update_float_attribute(uint16_t endpoint_id, uint32_t cluster_id, uint32_t attribute_id, float value)
+{
+    esp_matter_attr_val_t attr_val = esp_matter_nullable_float(nullable<float>(value));
+    return update(endpoint_id, cluster_id, attribute_id, &attr_val);
+}
+
+esp_err_t update_sps30_measurements(const Sps30Reading &reading)
+{
+    esp_err_t err = update_float_attribute(
+        s_device.air_quality_ep_id,
+        chip::app::Clusters::Pm1ConcentrationMeasurement::Id,
+        chip::app::Clusters::Pm1ConcentrationMeasurement::Attributes::MeasuredValue::Id,
+        reading.mass_pm1_0_ug_m3);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = update_float_attribute(
+        s_device.air_quality_ep_id,
+        chip::app::Clusters::Pm25ConcentrationMeasurement::Id,
+        chip::app::Clusters::Pm25ConcentrationMeasurement::Attributes::MeasuredValue::Id,
+        reading.mass_pm2_5_ug_m3);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = update_float_attribute(
+        s_device.air_quality_ep_id,
+        chip::app::Clusters::Pm10ConcentrationMeasurement::Id,
+        chip::app::Clusters::Pm10ConcentrationMeasurement::Attributes::MeasuredValue::Id,
+        reading.mass_pm10_ug_m3);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    return ESP_OK;
+}
+
 esp_err_t update_button_state(bool pressed)
 {
-    esp_matter_attr_val_t state_val = esp_matter_bool(pressed);
-    return update(s_device.button_ep_id,
-                  chip::app::Clusters::BooleanState::Id,
-                  chip::app::Clusters::BooleanState::Attributes::StateValue::Id,
-                  &state_val);
+    auto *cluster = esp_matter::data_model::provider::get_instance().registry().Get(
+        chip::app::ConcreteClusterPath(s_device.button_ep_id, chip::app::Clusters::BooleanState::Id));
+    if (!cluster) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    auto *boolean_state = static_cast<chip::app::Clusters::BooleanStateCluster *>(cluster);
+    esp_matter::lock::ScopedChipStackLock lock(portMAX_DELAY);
+    const bool previous = boolean_state->GetStateValue();
+    auto event_number = boolean_state->SetStateValue(pressed);
+    if (previous == pressed || event_number.has_value()) {
+        return ESP_OK;
+    }
+    return ESP_FAIL;
 }
 
 esp_err_t init_internal_temperature_sensor()
@@ -402,18 +496,24 @@ esp_err_t init_boot_button()
     return gpio_config(&boot_button_config);
 }
 
-esp_err_t init_exio_expander()
+esp_err_t init_sps30()
 {
-    TCA9554PWR_Init(kExioAllInputsMask);
-    const uint8_t config = Read_REG(TCA9554_CONFIG_REG);
-    const uint8_t inputs = Read_EXIOS();
-    ESP_LOGI(TAG, "EXIO ready via TCA9554: config=0x%02X inputs=0x%02X", config, inputs);
+    esp_err_t err = s_device.sps30.init(kSps30UartPort, kSps30TxGpio, kSps30RxGpio);
+    s_device.sps30_ready = (err == ESP_OK);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "SPS30 unavailable on UART%d TX=GPIO%d RX=GPIO%d: %s",
+                 static_cast<int>(kSps30UartPort),
+                 static_cast<int>(kSps30TxGpio),
+                 static_cast<int>(kSps30RxGpio),
+                 esp_err_to_name(err));
+        return err;
+    }
     return ESP_OK;
 }
 
-void update_thread_state_cache()
+void update_network_state_cache()
 {
-    s_indicator.thread_attached = chip::DeviceLayer::ConnectivityMgr().IsThreadAttached();
+    s_indicator.wifi_connected = chip::DeviceLayer::ConnectivityMgr().IsWiFiStationConnected();
     s_indicator.commissioned = chip::Server::GetInstance().GetFabricTable().FabricCount() > 0;
     s_indicator.window_open = chip::Server::GetInstance().GetCommissioningWindowManager().IsCommissioningWindowOpen();
 }
@@ -463,33 +563,6 @@ esp_err_t init_test_event_trigger_delegate()
     return ret;
 }
 
-esp_err_t init_power_management()
-{
-    esp_pm_config_t pm_config = {
-        .max_freq_mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
-        .min_freq_mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
-#if CONFIG_FREERTOS_USE_TICKLESS_IDLE
-        .light_sleep_enable = true,
-#else
-        .light_sleep_enable = false,
-#endif
-    };
-    return esp_pm_configure(&pm_config);
-}
-
-void configure_thread_device_mode()
-{
-    CHIP_ERROR err = chip::DeviceLayer::ConnectivityMgr().SetThreadDeviceType(
-        chip::DeviceLayer::ConnectivityManager::kThreadDeviceType_MinimalEndDevice);
-    if (err == CHIP_NO_ERROR) {
-        ESP_LOGI(TAG, "Thread device mode set to Minimal End Device");
-    } else {
-        ESP_LOGW(TAG, "Failed to switch Thread device mode: %s", chip::ErrorStr(err));
-    }
-}
-
-
-
 void indicator_task(void *)
 {
     uint32_t tick_ms = 0;
@@ -524,17 +597,39 @@ void telemetry_task(void *)
             ESP_LOGW(TAG, "Failed to read chip temperature: %s", esp_err_to_name(err));
         }
 
+        if (s_device.sps30_ready) {
+            Sps30Reading reading;
+            err = s_device.sps30.read_measurement(reading);
+            if (err == ESP_OK && reading.valid) {
+                ESP_LOGI(TAG,
+                         "SPS30: PM1.0=%.2f PM2.5=%.2f PM4.0=%.2f PM10=%.2f ug/m3",
+                         reading.mass_pm1_0_ug_m3,
+                         reading.mass_pm2_5_ug_m3,
+                         reading.mass_pm4_0_ug_m3,
+                         reading.mass_pm10_ug_m3);
+                err = update_sps30_measurements(reading);
+                if (err != ESP_OK) {
+                    ESP_LOGW(TAG, "Failed to update SPS30 Matter attributes: %s", esp_err_to_name(err));
+                }
+            } else if (err == ESP_ERR_NOT_FOUND) {
+                ESP_LOGD(TAG, "SPS30 measurement not ready yet");
+            } else {
+                ESP_LOGW(TAG, "Failed to read SPS30 measurement: %s", esp_err_to_name(err));
+            }
+        }
+
         since_heartbeat_ms += kTelemetryPeriodMs;
         if (since_heartbeat_ms >= kHeartbeatPeriodMs) {
             since_heartbeat_ms = 0;
             const uint32_t uptime_s =
                 (xTaskGetTickCount() - s_boot_tick) * portTICK_PERIOD_MS / 1000;
             ESP_LOGI(TAG,
-                     "Heartbeat: thread_attached=%d commissioned=%d window_open=%d "
+                     "Heartbeat: wifi_connected=%d commissioned=%d window_open=%d sps30_ready=%d "
                      "free_heap=%u uptime_s=%u",
-                     static_cast<int>(s_indicator.thread_attached),
+                     static_cast<int>(s_indicator.wifi_connected),
                      static_cast<int>(s_indicator.commissioned),
                      static_cast<int>(s_indicator.window_open),
+                     static_cast<int>(s_device.sps30_ready),
                      static_cast<unsigned>(esp_get_free_heap_size()),
                      static_cast<unsigned>(uptime_s));
         }
@@ -552,9 +647,7 @@ void button_task(void *)
     bool preview_factory_reset_set = false;
 
     s_device.button_pressed = reported_state;
-    if (update_button_state(reported_state) != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to publish initial button state");
-    }
+    ESP_LOGI(TAG, "BOOT button task ready, initial state=%d", static_cast<int>(reported_state));
 
     while (true) {
         const bool current_sample = read_boot_button_pressed();
@@ -631,14 +724,14 @@ esp_err_t identify_callback(identification::callback_type_t type, uint16_t endpo
 void matter_event_callback(const chip::DeviceLayer::ChipDeviceEvent *event, intptr_t arg)
 {
     switch (event->Type) {
-    case chip::DeviceLayer::DeviceEventType::kThreadStateChange:
-        s_indicator.thread_attached = chip::DeviceLayer::ConnectivityMgr().IsThreadAttached();
-        ESP_LOGI(TAG, "Thread state change: attached=%d",
-                 static_cast<int>(s_indicator.thread_attached));
+    case chip::DeviceLayer::DeviceEventType::kWiFiConnectivityChange:
+        s_indicator.wifi_connected = chip::DeviceLayer::ConnectivityMgr().IsWiFiStationConnected();
+        ESP_LOGI(TAG, "Wi-Fi connectivity change: connected=%d",
+                 static_cast<int>(s_indicator.wifi_connected));
         break;
     case chip::DeviceLayer::DeviceEventType::kCommissioningComplete:
         ESP_LOGI(TAG, "Commissioning complete");
-        update_thread_state_cache();
+        update_network_state_cache();
         log_commissioning_state("commissioning-complete");
         break;
     case chip::DeviceLayer::DeviceEventType::kCommissioningSessionStarted:
@@ -693,13 +786,14 @@ extern "C" void app_main(void)
 {
     s_boot_tick = xTaskGetTickCount();
 
-    ESP_LOGI(TAG, "Starting %s %s — Matter over Thread (firmware %s)",
+    ESP_LOGI(TAG, "Starting %s %s - Matter over Wi-Fi (firmware %s)",
              kBoardIdentity.vendor_name, kBoardIdentity.product_name,
              kBoardIdentity.software_version_str);
     ESP_LOGI(TAG, "Reset reason: %s", reset_reason_str(esp_reset_reason()));
-    ESP_LOGI(TAG, "Reserved for TCA9554 EXIO: GPIO%d=SDA GPIO%d=SCL",
-             static_cast<int>(kExioSdaGpio),
-             static_cast<int>(kExioSclGpio));
+    ESP_LOGI(TAG, "SPS30 UART: UART%d TX=GPIO%d RX=GPIO%d baud=115200",
+             static_cast<int>(kSps30UartPort),
+             static_cast<int>(kSps30TxGpio),
+             static_cast<int>(kSps30RxGpio));
 
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -707,23 +801,14 @@ extern "C" void app_main(void)
         nvs_flash_init();
     }
 
-    esp_openthread_platform_config_t ot_config = {};
-    ot_config.radio_config.radio_mode          = RADIO_MODE_NATIVE;
-    ot_config.host_config.host_connection_mode = HOST_CONNECTION_MODE_NONE;
-    ot_config.port_config.storage_partition_name = "nvs";
-    ot_config.port_config.netif_queue_size       = 10;
-    ot_config.port_config.task_queue_size        = 10;
-    set_openthread_platform_config(&ot_config);
-    ESP_LOGI(TAG, "OpenThread platform config installed");
-
-    ESP_ERROR_CHECK(init_power_management());
     ESP_ERROR_CHECK(init_internal_temperature_sensor());
     ESP_ERROR_CHECK(init_led_strip());
     ESP_ERROR_CHECK(init_boot_button());
-    ESP_ERROR_CHECK(init_exio_expander());
+    init_sps30();
     s_device.button_pressed = read_boot_button_pressed();
 
     ESP_ERROR_CHECK(bms_node_core::install_device_identity(s_device_info_provider));
+    ESP_ERROR_CHECK(configure_wifi_hostname_from_serial());
     ESP_ERROR_CHECK(init_test_event_trigger_delegate());
 
     node::config_t node_config;
@@ -733,7 +818,6 @@ extern "C" void app_main(void)
         return;
     }
     ESP_ERROR_CHECK(ensure_serial_number_attribute());
-    ESP_ERROR_CHECK(bms_node_core::thread_diagnostics::ensure_root_identity_attributes(TAG));
 
     temperature_sensor::config_t temp_config;
     endpoint_t *temp_ep = temperature_sensor::create(node, &temp_config, ENDPOINT_FLAG_NONE, nullptr);
@@ -749,16 +833,42 @@ extern "C" void app_main(void)
         return;
     }
 
+    air_quality_sensor::config_t air_quality_config;
+    endpoint_t *air_quality_ep = air_quality_sensor::create(node, &air_quality_config, ENDPOINT_FLAG_NONE, nullptr);
+    if (!air_quality_ep) {
+        ESP_LOGE(TAG, "Failed to create air_quality_sensor endpoint");
+        return;
+    }
+
+    cluster::concentration_measurement::config_t pm_config;
+    pm_config.measurement_medium = 0; // Air
+    pm_config.feature_flags = cluster::concentration_measurement::feature::numeric_measurement::get_id();
+    pm_config.features.numeric_measurement.measurement_unit = 4; // ug/m3
+
+    if (!cluster::pm1_concentration_measurement::create(air_quality_ep, &pm_config, CLUSTER_FLAG_SERVER)) {
+        ESP_LOGE(TAG, "Failed to create PM1 concentration cluster");
+        return;
+    }
+    if (!cluster::pm25_concentration_measurement::create(air_quality_ep, &pm_config, CLUSTER_FLAG_SERVER)) {
+        ESP_LOGE(TAG, "Failed to create PM2.5 concentration cluster");
+        return;
+    }
+    if (!cluster::pm10_concentration_measurement::create(air_quality_ep, &pm_config, CLUSTER_FLAG_SERVER)) {
+        ESP_LOGE(TAG, "Failed to create PM10 concentration cluster");
+        return;
+    }
+
     s_device.temp_ep_id = endpoint::get_id(temp_ep);
     s_device.button_ep_id = endpoint::get_id(button_ep);
-    ESP_LOGI(TAG, "Endpoints: temperature=%u button=%u",
+    s_device.air_quality_ep_id = endpoint::get_id(air_quality_ep);
+    ESP_LOGI(TAG, "Endpoints: temperature=%u button=%u air_quality=%u",
              s_device.temp_ep_id,
-             s_device.button_ep_id);
+             s_device.button_ep_id,
+             s_device.air_quality_ep_id);
 
     esp_matter::start(matter_event_callback);
-    configure_thread_device_mode();
 
-    update_thread_state_cache();
+    update_network_state_cache();
     log_commissioning_state("after-start");
     log_onboarding_codes();
 

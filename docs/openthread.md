@@ -4,12 +4,15 @@ This document describes the OTBR side of the optional Matter/Thread stack used i
 
 ## Matter Server commissioning note
 
-`matter-server` commissioning is only stable in this project environment with a dedicated external USB BLE adapter.
+`matter-server` commissioning uses either the Raspberry Pi internal BLE adapter (`hci0`) or no BLE at all.
 
-- Use the tested Realtek USB BLE dongle (`0bda:8771`, Bluetooth address `8C:88:2B:24:32:8F`) for commissioning.
-- Do not use the Raspberry Pi internal Cypress BLE adapter or the MediaTek Wi-Fi/AP combo BLE adapter for commissioning.
-- The MediaTek `0e8d:7961` adapter is the Wi-Fi/AP combo device and is explicitly unsuitable for Matter commissioning here.
-- The Raspberry Pi internal Cypress/Broadcom Bluetooth is disabled at boot on project hosts; keep commissioning on the external Realtek dongle.
+- Do not require an external USB BLE adapter for commissioning.
+- Keep `wlan0` and `wlan1` connected during BLE tests; `restart-matter-server.sh` does not disconnect Wi-Fi.
+- Use `./scripts/restart-matter-server.sh` for BLE commissioning through `hci0`; internal BLE is the default.
+- The restart script prepares `hci0` by stopping stale scans, powering Bluetooth on, unblocking Bluetooth, and bringing `hci0` up before recreating `matter-server`.
+- If `hci0` remains blocked or down, run `sudo rfkill unblock bluetooth && sudo hciconfig hci0 up` from a local shell.
+- Set `MATTER_INTERNAL_BLE_PREPARE=0` only when the host Bluetooth stack must not be touched.
+- Use `MATTER_BLE_MODE=disabled ./scripts/restart-matter-server.sh` for network-only commissioning; pair with `network_only: true`.
 - Start or restart `matter-server` with `./scripts/restart-matter-server.sh`; raw `docker restart` preserves stale `BLUETOOTH_ADAPTER` values after HCI renumbering.
 
 For a fresh or factory-reset Wi-Fi/Thread device, commission through BLE with the QR payload and do not pass `network_only`.
@@ -150,10 +153,11 @@ Start the Matter-side services afterwards:
 
 BLE commissioning policy:
 
-- Use the hardcoded Realtek USB BLE adapter only (`0bda:8771`, Bluetooth address `8C:88:2B:24:32:8F`).
-- Internal BLE fallback is disabled in `restart-matter-server.sh`.
-- MediaTek `0e8d:7961` is blocked by `restart-matter-server.sh` because commissioning failed repeatedly with this combo adapter.
-- If Linux renumbers HCI devices, rerun `./scripts/restart-matter-server.sh`; the script resolves the current `hciN` from the hardcoded Realtek identity and recreates `matter-server`.
+- Use the Raspberry Pi internal BLE adapter as `hci0`.
+- Or disable BLE entirely with `MATTER_BLE_MODE=disabled` and use network-only commissioning.
+- The external USB BLE workflow is intentionally not used.
+- If Linux exposes a different internal HCI index, fix the host mapping before starting Matter services; this lab workflow expects internal BLE at `hci0`.
+- If `matter-server` has a stale adapter value or BLE connection timeout, rerun `./scripts/restart-matter-server.sh`; the script prepares `hci0` and recreates `matter-server` with `BLUETOOTH_ADAPTER=0` for internal BLE or `BLUETOOTH_ADAPTER=999` for disabled BLE.
 
 ## First-time dataset initialization
 

@@ -290,7 +290,7 @@ ensure_ipv6_forwarding() {
 
 RCP_DEVICE="$(read_env_var OTBR_RCP_DEVICE /dev/ttyACM0)"
 RCP_TCP_ENDPOINT="$(read_env_var OTBR_RCP_TCP_ENDPOINT "")"
-INFRA_IF="$(read_env_var OTBR_INFRA_IF wlan1)"
+INFRA_IF="$(read_env_var OTBR_INFRA_IF wlan0)"
 
 log_info "OpenThread host check mode: ${MODE}"
 log_info "RCP device: ${RCP_DEVICE}"

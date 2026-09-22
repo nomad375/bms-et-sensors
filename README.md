@@ -11,10 +11,10 @@ Docker stack for sensor data acquisition and visualization:
 - `ap-control`: Raspberry Pi access point operator UI for AP state and connected clients.
 - `service-controller`: lightweight control API to start/stop selected service groups from dashboard; guards MSCL, RedLab, and ALMEMO hardware presence.
 - `dashboard`: lightweight start page based on `simple-dash`, served by `nginx`.
-- `matter-server`: Python Matter Server (Nabu Casa) for controlled Matter diagnostics and collection.
+- `matter-server`: Matter.js Server for controlled Matter diagnostics and collection.
 - `matter-collector`: collector that bridges Matter events to InfluxDB.
 - `openthread-border-router`: Border Router for Thread mesh (requires OpenThread RCP, USB or network socket).
-- `messkluppe-collector`: legacy Messkluppe host-side collector scaffold; decodes nRF24 binary payloads and writes InfluxDB records, with fake mode available before node hardware is connected.
+- `messkluppe-collector`: Messkluppe host-side collector; decodes nRF24 binary payloads and writes InfluxDB records, with fake mode available before node hardware is connected.
 
 The repository includes Matter/Thread stack documentation:
 
@@ -25,71 +25,29 @@ ESP32/Matter/Thread node workspace is included in this repository under `nodes`.
 
 ## Matter Server status
 
-`matter-server` commissioning is only stable in this project environment with a dedicated external USB BLE adapter.
+`matter-server` commissioning in this project supports only two BLE policies: Raspberry Pi internal `hci0`, or no BLE at all.
 
-- Use the tested Realtek USB BLE dongle (`0bda:8771`, Bluetooth address `8C:88:2B:24:32:8F`) for commissioning.
-- Do not use the Raspberry Pi internal Cypress BLE adapter or the MediaTek Wi-Fi/AP combo BLE adapter for commissioning.
-- Start Matter services via `./scripts/restart-matter-server.sh` so the current `hciN` index is resolved from the hardcoded Realtek adapter identity before container recreation.
+- Use `MATTER_BLE_MODE=internal ./scripts/restart-matter-server.sh` for BLE commissioning through internal `hci0`.
+- Use `MATTER_BLE_MODE=disabled ./scripts/restart-matter-server.sh` for IP-only commissioning of devices that are already reachable on the network.
+- Do not use an external USB BLE adapter in this workflow.
+- Start Matter services via `./scripts/restart-matter-server.sh` so the container is recreated with the intended `BLUETOOTH_ADAPTER` value.
 - Do not restart `matter-server` with raw `docker restart`; that preserves the old `BLUETOOTH_ADAPTER` value after Linux renumbers HCI devices.
 - For fresh or factory-reset Thread devices, call `commission_with_code` with the `MT:...` QR payload and without `network_only`.
   `network_only: true` disables BLE discovery and is only for devices already reachable on the IP network.
 
 Known BLE adapter policy:
 
-- Supported: external USB Realtek RTL8761BU (`0bda:8771`), verified with HAMA Smart Plug and ESP32-S-CAM commissioning.
-- Unsupported: Raspberry Pi internal Cypress/Broadcom BLE; it fails during BLE link establishment with HCI reason `0x3e`.
+- Supported: Raspberry Pi internal BLE as `hci0`.
+- Supported: no BLE (`MATTER_BLE_MODE=disabled`) for network-only commissioning.
+- Unsupported: external USB BLE adapters; this workflow intentionally avoids them.
 - Unsupported: MediaTek `0e8d:7961` Wi-Fi/AP combo BLE; it is not suitable for Matter commissioning in this stack.
-- Host setup disables the internal Raspberry Pi Bluetooth at boot; keep Matter commissioning on the external Realtek dongle.
+- Keep Wi-Fi connected during BLE tests; the restart script does not disconnect `wlan0` or `wlan1`.
 
 ## AI agent rules
 
 - `AGENTS.md` in the project root is the canonical rule file for Codex.
 - Keep Codex-specific project conventions and workflow constraints in `AGENTS.md`.
 - Keep the file concise enough to stay within Codex loading limits (current practical target: well below 32 KiB).
-
-## Release notes
-
-### v6.5.7
-
-- Matter commissioning now uses the hardcoded tested Realtek BLE adapter (`0bda:8771`, Bluetooth address `8C:88:2B:24:32:8F`) and resolves its current `hciN` before recreating `matter-server`.
-- Internal Cypress BLE and MediaTek Wi-Fi/AP combo BLE are documented as unsupported for commissioning after repeated HCI-level failures.
-- ESP32-S-CAM Matter firmware no longer forces a second commissioning window after startup.
-- Raspberry Pi AP, Matter primary interface, and AP UI defaults now target `wlan1`.
-
-### v6.5.0
-
-- Added `ap-control` at `/ap/` for Raspberry Pi AP control, connected-client inspection, signal/RX/TX metrics, and DHCP hostname display.
-- Dashboard section `Wlan / Matter / Thread` now links to `AP Control`.
-- Matter + Thread Console top navigation now includes a direct `Matter Graf 5m` shortcut to `/graf/matter?range=5m`.
-- Thread child association rules were simplified into a single ordered inference pass, preserving stable Pico matching for `rloc-only` OTBR children.
-
-### v6.4.4
-
-- Thread topology tree now shows colored Matter `node xx` badges for matched routers and children.
-- Router-child links can reuse RSSI/LQI from the router Matter NeighborTable, so children behind `BMS-C6CH-499B30` keep signal data even when OTBR meshdiag only reports LQI.
-- Upstream OTBR-router links now prefer the richest OTBR neighbor edge, preserving RSSI between the border router and the router when multiple evidence edges exist.
-- Quarantined child matching now ignores trusted sibling RLOC-only children under the same parent, keeping the Pico association stable after node re-pairing.
-
-### v6.4.3
-
-- Matter Thread topology now uses the new Matter Server + OTBR evidence model as the canonical `/thread-topology` endpoint.
-- Removed the legacy topology/debug endpoints and side-by-side UI comparison so the console shows a single inferred topology tree.
-- Added inferred matching for quarantined Matter Thread nodes using OTBR parent-child/router evidence while preserving duplicate reported-address warnings.
-
-### v4.1.0
-
-- `Sensor Info` now uses a compact ALMEMO fast overview sequence: `G00`, `Mxx`, `f2 P00`, `P32`.
-- Peak-related reads (`P02`, `P03`, `P28`, `P29`) were removed from the button path and documented as manual commands in the UI help.
-- No-live timing improved after the change, with the biggest gain on `Sensor Info` (`5.510s` -> `3.834s`).
-- The next large speed gains, if needed later, are more likely to come from serial-session mechanics than from changing ALMEMO read commands again.
-
-### v4.0.4
-
-- `almemo-collector` now executes multi-step interactive UI actions as a single guarded server-side batch via `/api/command-sequence`.
-- ALMEMO serial handling now sends explicit `XON` after buffer resets and after stream-to-command session rearm, preventing the observed V6 `XOFF` freeze / reconnect loop.
-- Tested UI flows no longer reproduced cable/device dropouts during `Print Cycle`, `Continuous Query`, `Sensor Info`, smoothing writes, and time/date writes.
-- Remaining known issue: response time is still noticeably slower while live data streaming is active; without live data the same ALMEMO actions are significantly faster.
-- After rebuilding `almemo-collector`, use a hard browser refresh so the updated `ui.js` is loaded.
 
 ## Requirements
 
@@ -181,9 +139,9 @@ Note:
   - keeps `mscl-collector` stopped while the configured MSCL base serial path is absent
   - starts `mscl-collector` only after the MSCL serial path is present and stable
   - uses `MSCL_PORT` first, then falls back to a `WSDA-Base-200` path in `/dev/serial/by-id`
-- Matter commissioning uses only the hardcoded Realtek USB BLE adapter (`0bda:8771`, Bluetooth address `8C:88:2B:24:32:8F`).
-  - Internal BLE fallback is disabled by design.
-  - Start Matter services via `./scripts/restart-matter-server.sh` so the current `hciN` index is resolved before container recreation.
+- Matter commissioning uses either internal `hci0` BLE or `MATTER_BLE_MODE=disabled` for network-only commissioning.
+  - External USB BLE is not used by design.
+  - Start Matter services via `./scripts/restart-matter-server.sh` so the selected BLE mode is applied before container recreation.
 
 - Build/restart all custom app services:
 
@@ -263,8 +221,8 @@ Use `config/pyrometers-devices.example.json` only as the tracked template:
 ```
 
 This rebuilds `matter-collector` only and does not touch `matter-server`; use
-`./scripts/restart-matter-server.sh` for Matter Server so the Realtek BLE
-adapter is re-detected first.
+`./scripts/restart-matter-server.sh` for Matter Server so the selected BLE mode
+is applied first.
 
 - Fast MSCL restart in dev mode (bind-mounted `./app/mscl`):
 
@@ -371,29 +329,6 @@ Shared InfluxDB tag style:
 - `AP_CHANNEL`
 - `AP_LOCAL_DNS_ENABLE`
 - `AP_LOCAL_DNS_NAME`
-
-### Removed legacy env variables
-These keys are now hard-coded inside the stack and should not be added back to `.env` unless the code changes:
-- `INFLUX_URL`
-- `GRAFANA_ROOT_URL`
-- `MQTT_PORT`
-- `TZ`
-- `GRAF_APP_MSCL_CHANNEL`
-- `GRAF_APP_REDLAB_MEASUREMENT`
-- `TEMP_MIN`
-- `REDLAB_HEALTH_PORT`
-- `MSCL_MEASUREMENT`
-- `MSCL_SOURCE_RADIO_TAG`
-- `MSCL_SOURCE_NODE_EXPORT_TAG`
-- `SVCCTL_REDLAB_GUARD_ENABLED`
-- `SVCCTL_REDLAB_GUARD_INTERVAL_SEC`
-- `SVCCTL_REDLAB_USB_VENDOR_ID`
-- `SVCCTL_REDLAB_USB_PRODUCT_ID`
-- `SVCCTL_REDLAB_USB_STABLE_SEC`
-
-These older removed keys are not used by the current stack:
-- `GRAFANA_ACCESS_ADDRESS`
-- `GRAF_APP_PORT`
 
 ## Containers and addresses
 

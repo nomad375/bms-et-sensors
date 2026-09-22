@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-NODE_DIR="${PROJECT_ROOT}/nodes/esp32c6Pico/matter-node"
+NODE_DIR="${PROJECT_ROOT}/nodes/esp32c6Pico/matter-thread-node"
 
 BUILD_TIMEOUT_SEC="${BUILD_TIMEOUT_SEC:-3600}"
 FIRMWARE_FULLCLEAN="${FIRMWARE_FULLCLEAN:-0}"

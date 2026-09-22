@@ -95,6 +95,9 @@ def register_routes(app, ctx: dict):
             load_messkluppe_battery_series_fn=ctx["load_messkluppe_battery_series_fn"],
             load_messkluppe_temperature_series_fn=ctx["load_messkluppe_temperature_series_fn"],
             load_matter_series_fn=ctx["load_matter_series_fn"],
+            load_matter_humidity_series_fn=ctx["load_matter_humidity_series_fn"],
+            load_matter_pressure_series_fn=ctx["load_matter_pressure_series_fn"],
+            load_matter_pm_series_fn=ctx["load_matter_pm_series_fn"],
             load_matter_battery_series_fn=ctx["load_matter_battery_series_fn"],
             panel_raw_cadence_ms_fn=ctx["panel_raw_cadence_ms_fn"],
         )
@@ -202,12 +205,12 @@ def register_routes(app, ctx: dict):
             return error_response, status_code
         return ctx["build_single_export_response"](
             resolved=resolved,
-            load_series_fn=ctx["load_matter_series_fn"],
+            load_series_fn=ctx["load_matter_environment_series_fn"],
             naming_fn=ctx["matter_csv_column_name_fn"],
             append_series_rows_fn=ctx["append_series_rows_fn"],
             csv_export_response_fn=ctx["csv_export_response_fn"],
             precision=2,
-            filename_prefix="matter_temperature",
+            filename_prefix="matter_environment",
         )
 
     @app.route("/api/export/messkluppe.csv")
@@ -238,6 +241,7 @@ def register_routes(app, ctx: dict):
             load_pyrometers_series_fn=ctx["load_pyrometers_series_fn"],
             load_messkluppe_series_fn=ctx["load_messkluppe_series_fn"],
             load_matter_series_fn=ctx["load_matter_series_fn"],
+            load_matter_environment_series_fn=ctx["load_matter_environment_series_fn"],
             append_series_rows_fn=ctx["append_series_rows_fn"],
             csv_export_response_fn=ctx["csv_export_response_fn"],
             mscl_csv_column_name_fn=lambda name: ctx["mscl_csv_column_name_fn"](name, ctx["mscl_source"], ctx["mscl_source_extra"]),

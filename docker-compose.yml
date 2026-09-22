@@ -106,7 +106,7 @@ services:
     environment:
       - TZ=UTC
       - OT_RCP_DEVICE=spinel+hdlc+uart://${OTBR_RCP_DEVICE:-/dev/ttyACM0}?uart-baudrate=${OTBR_RCP_BAUD:-1000000}
-      - OT_INFRA_IF=${OTBR_INFRA_IF:-wlan1}
+      - OT_INFRA_IF=${OTBR_INFRA_IF:-wlan0}
       - OT_THREAD_IF=${OTBR_THREAD_IF:-wpan0}
       - OT_LOG_LEVEL=${OTBR_LOG_LEVEL:-5}
       - OT_WEB_LISTEN_ADDR=0.0.0.0
@@ -114,11 +114,11 @@ services:
       - --radio-url
       - spinel+hdlc+uart://${OTBR_RCP_DEVICE:-/dev/ttyACM0}?uart-baudrate=${OTBR_RCP_BAUD:-1000000}
       - --backbone-interface
-      - ${OTBR_INFRA_IF:-wlan1}
+      - ${OTBR_INFRA_IF:-wlan0}
       - --interface
       - ${OTBR_THREAD_IF:-wpan0}
       - --trel-url
-      - trel://${OTBR_INFRA_IF:-wlan1}
+      - trel://${OTBR_INFRA_IF:-wlan0}
       - --debug-level
       - ${OTBR_LOG_LEVEL:-5}
     restart: unless-stopped
@@ -142,8 +142,8 @@ services:
       - TZ=UTC
       - STORAGE_PATH=/data
       - LISTEN_ADDRESS=${MATTER_LISTEN_ADDRESS:-0.0.0.0}
-      - PRIMARY_INTERFACE=${MATTER_PRIMARY_IF:-wlan1}
-      - BLUETOOTH_ADAPTER=${MATTER_REALTEK_BLUETOOTH_ADAPTER:-999}
+      - PRIMARY_INTERFACE=${MATTER_PRIMARY_IF:-wlan0}
+      - BLUETOOTH_ADAPTER=${MATTER_BLUETOOTH_ADAPTER:-999}
       - LOG_LEVEL=${MATTER_SERVER_LOG_LEVEL:-info}
       - PRODUCTION_MODE=${MATTER_SERVER_PRODUCTION_MODE:-true}
     restart: unless-stopped
@@ -296,9 +296,9 @@ services:
     environment:
       - TZ=UTC
       - AP_UI_PORT=${AP_UI_PORT:-3070}
-      - AP_UI_INTERFACE=${AP_UI_INTERFACE:-wlan1}
+      - AP_UI_INTERFACE=${AP_UI_INTERFACE:-wlan0}
       - AP_UI_PROFILE=${AP_UI_PROFILE:-}
-      - AP_UI_LEASE_FILE=${AP_UI_LEASE_FILE:-/host/var/lib/NetworkManager/dnsmasq-wlan1.leases}
+      - AP_UI_LEASE_FILE=${AP_UI_LEASE_FILE:-/host/var/lib/NetworkManager/dnsmasq-wlan0.leases}
     volumes:
       - /run/dbus:/run/dbus
       - /var/lib/NetworkManager:/host/var/lib/NetworkManager:ro
