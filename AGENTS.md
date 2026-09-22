@@ -3,9 +3,9 @@ EN: User wants answers in Russian. All code and comments must be in English.
 
 ## Purpose / Назначение
 
-EN: This file defines a shared operating guide for coding agents working in this repository. It complements `README.md` (product/runtime docs) and `CLAUDE.md` (assistant-specific context) with practical implementation rules that should stay model-agnostic.
+EN: This file defines a shared operating guide for coding agents working in this repository. It complements `README.md` (product/runtime docs), `GEMINI.md`, and `CLAUDE.md` (assistant-specific context) with practical implementation rules that should stay model-agnostic.
 
-RU: Этот файл задает общий рабочий регламент для кодовых агентов в данном репозитории. Он дополняет `README.md` (документация по продукту и рантайму) и `CLAUDE.md` (контекст для ассистента) практическими правилами, не привязанными к конкретной модели.
+RU: Этот файл задает общий рабочий регламент для кодовых агентов в данном репозитории. Он дополняет `README.md` (документация по продукту и рантайму), `GEMINI.md` и `CLAUDE.md` (контекст для ассистента) практическими правилами, не привязанными к конкретной модели.
 
 ## Project summary / Кратко о проекте
 
@@ -228,4 +228,5 @@ RU: Matter/Thread (`scripts/openthread-host-setup.sh`, `scripts/restart-openthre
 ## References / Ссылки
 
 - `README.md` — primary product documentation / основная документация по продукту.
+- `GEMINI.md` — assistant guide and architecture context / руководство ассистента и контекст архитектуры.
 - `CLAUDE.md` — assistant context and architecture summary / контекст ассистента и сводка архитектуры.

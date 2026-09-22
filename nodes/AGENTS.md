@@ -7,6 +7,7 @@ This repository contains firmware projects for BMS DOA Matter nodes.
 - `esp32c6zero/matter-node` - Matter over Thread for `ESP32-C6-Zero`
 - `esp32c6DevKitC/matter-node` - Matter over Thread for `ESP32-C6-DevKitC`
 - `esp32c6Pico/matter-node` - Matter over Thread for `ESP32-C6-Pico`
+- `seeedXiaoEsp32C6/matter-node` - Matter over Thread for `Seeed Studio XIAO ESP32-C6` on Expansion Board Base v1.1
 - `esp32c3SuperMini/matter-node` - Matter over Wi-Fi for `ESP32-C3-SuperMini`
 - `m5stickcPlus2/matter-node` - Matter over Wi-Fi for `M5StickC Plus2`
 - root `README.md` and board-specific `*.md` files are the canonical docs
@@ -18,6 +19,7 @@ This repository contains firmware projects for BMS DOA Matter nodes.
   - `ESP32-C6-Zero.md`
   - `ESP32-C6-DevKitC.md`
   - `ESP32-C6-Pico.md`
+  - `Seeed-XIAO-ESP32-C6.md`
   - `ESP32-C3-SuperMini.md`
   - `M5StickC-Plus2.md`
 - Do not reintroduce ad hoc files like `*-HELP.md`, `*-QUICKREF.html`, or duplicate per-board READMEs unless explicitly requested.
